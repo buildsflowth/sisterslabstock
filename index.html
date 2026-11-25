@@ -81,6 +81,7 @@
       <a href="#/inventory" data-page="inventory"><i class="bi bi-box-seam"></i><span>สินค้าคงคลัง</span></a>
       <a href="#/alerts" data-page="alerts"><i class="bi bi-hourglass-split"></i><span>แจ้งเตือนอายุสินค้า</span><em class="sb-count hidden" id="sb-alert-count">0</em></a>
       <a href="#/reorder" data-page="reorder"><i class="bi bi-cart3"></i><span>สินค้าที่ต้องสั่งซื้อ</span><em class="sb-count hidden" id="sb-reorder-count">0</em></a>
+      <a href="#/count" data-page="count"><i class="bi bi-clipboard-check"></i><span>ตรวจนับสต็อก</span></a>
       <div class="sb-group">รายงาน</div>
       <a href="#/report" data-page="report"><i class="bi bi-bar-chart-line"></i><span>รายงานความเคลื่อนไหว</span></a>
       <div class="sb-group" data-role="Admin">ผู้ดูแลระบบ</div>
@@ -312,6 +313,58 @@
           <button class="btn btn-ghost btn-sm" id="ro-pdf"><i class="bi bi-printer"></i> พิมพ์ใบสั่งซื้อ (PDF)</button>
         </div>
         <div class="card p0"><div id="ro-table"></div></div>
+      </section>
+
+      <!-- ===== STOCK COUNT ===== -->
+      <section class="page" id="page-count">
+        <div id="cnt-list-view">
+          <div class="kpis kpis-sm" id="cnt-kpis"></div>
+          <div class="list-head">
+            <div class="seg" id="cnt-tabs">
+              <button data-v="history" class="active">ประวัติการตรวจนับ</button>
+              <button data-v="status">สถานะการนับรายสินค้า</button>
+            </div>
+            <div class="row-gap">
+              <button class="btn btn-ghost btn-sm" id="cnt-print-sheet"><i class="bi bi-printer"></i> พิมพ์ใบนับสต็อก</button>
+              <button class="btn btn-ghost btn-sm" id="cnt-print-cards"><i class="bi bi-file-earmark-text"></i> พิมพ์ Stock Card</button>
+              <a class="btn btn-primary btn-sm" href="#/count?new=1" data-role="Staff"><i class="bi bi-plus-lg"></i> บันทึกการนับใหม่</a>
+            </div>
+          </div>
+          <div class="card p0"><div id="cnt-table"></div></div>
+        </div>
+        <div id="cnt-form-view" class="hidden">
+          <div class="card">
+            <div class="card-head"><h3><i class="bi bi-clipboard-check"></i> บันทึกผลการตรวจนับ</h3>
+              <a class="btn btn-ghost btn-sm" href="#/count"><i class="bi bi-arrow-left"></i> กลับ</a></div>
+            <div class="filters">
+              <label class="field"><span>วันที่นับ</span><input type="date" class="input" id="cf-date"></label>
+              <label class="field"><span>คลังสินค้า</span><select class="select" id="cf-wh"></select></label>
+              <label class="field grow"><span>หมายเหตุ</span><input class="input" id="cf-note" maxlength="500" placeholder="เช่น นับประจำเดือน / ผู้ร่วมนับ"></label>
+            </div>
+            <div id="cf-last" class="hint" style="margin-top:12px"></div>
+          </div>
+          <div class="list-head">
+            <div class="row-gap">
+              <input class="input input-sm" id="cf-q" placeholder="กรองสินค้า / บาร์โค้ด / Lot">
+              <button class="btn btn-ghost btn-sm" id="cf-fill" title="ใส่ยอดในระบบลงช่องที่ยังว่าง"><i class="bi bi-magic"></i> เติมยอดตามระบบ</button>
+            </div>
+            <span class="muted" id="cf-summary"></span>
+          </div>
+          <div class="card p0"><div id="cf-table"></div></div>
+          <div class="card">
+            <div class="card-head"><h3><i class="bi bi-camera"></i> รูปหลักฐานการนับ</h3><span class="muted small">สูงสุด 12 รูป · ระบบย่อขนาดรูปให้อัตโนมัติ</span></div>
+            <div class="photo-grid" id="cf-photos"></div>
+            <input type="file" id="cf-file" accept="image/*" multiple hidden>
+          </div>
+          <div class="card">
+            <label class="check"><input type="checkbox" id="cf-adjust"> ปรับยอดในระบบให้ตรงกับจำนวนที่นับได้ (สร้างรายการรับเข้า/เบิกออกเพื่อปรับยอดอัตโนมัติ)</label>
+            <p class="hint" style="margin-top:8px"><i class="bi bi-info-circle"></i> ถ้าไม่เลือก ระบบจะเก็บผลการนับเป็นหลักฐานอย่างเดียว ยอดคงเหลือไม่เปลี่ยน · บันทึกเฉพาะรายการที่กรอกจำนวนนับแล้ว</p>
+            <div class="row-gap" style="margin-top:14px;justify-content:flex-end">
+              <a class="btn btn-ghost" href="#/count">ยกเลิก</a>
+              <button class="btn btn-primary" id="cf-save"><i class="bi bi-check2-circle"></i> บันทึกผลการนับ</button>
+            </div>
+          </div>
+        </div>
       </section>
 
       <!-- ===== REPORT ===== -->
