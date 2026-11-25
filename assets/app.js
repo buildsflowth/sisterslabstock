@@ -142,6 +142,7 @@ const PAGES = {
   inventory: { title: 'สินค้าคงคลัง', sub: 'ยอดคงเหลือแยกตาม Lot และคลัง', render: renderInventory },
   alerts: { title: 'แจ้งเตือนอายุสินค้า', sub: 'สินค้าที่ใกล้หมดอายุและต้องดำเนินการ', render: renderAlerts },
   reorder: { title: 'สินค้าที่ต้องสั่งซื้อ', sub: 'ยอดคงเหลือต่ำกว่าจุดสั่งซื้อ (Reorder Point)', render: renderReorder },
+  count: { title: 'ตรวจนับสต็อก', sub: 'หลักฐานการนับพร้อมรูปถ่าย · ใบนับสต็อก · Stock Card', render: renderCount },
   report: { title: 'รายงานความเคลื่อนไหว', sub: 'รับเข้า–เบิกออกตามช่วงเวลา', render: renderReport },
   settings: { title: 'ตั้งค่า Stock', sub: 'อัตราการใช้, จุดสั่งซื้อ, คลังและหมวดหมู่', role: 'Admin', render: renderSettings },
   users: { title: 'ผู้ใช้งาน', sub: 'บัญชีผู้ใช้และประวัติการใช้งาน', role: 'Admin', render: renderUsers },
@@ -394,7 +395,7 @@ async function changePassword() {
 
 $('#bn-more').addEventListener('click', () => {
   const items = [
-    ['docs', 'journal-text', 'ประวัติเอกสาร'], ['reorder', 'cart3', 'สินค้าที่ต้องสั่งซื้อ'], ['report', 'bar-chart-line', 'รายงานความเคลื่อนไหว'],
+    ['docs', 'journal-text', 'ประวัติเอกสาร'], ['reorder', 'cart3', 'สินค้าที่ต้องสั่งซื้อ'], ['count', 'clipboard-check', 'ตรวจนับสต็อก'], ['report', 'bar-chart-line', 'รายงานความเคลื่อนไหว'],
     ['settings', 'sliders', 'ตั้งค่า Stock', 'Admin'], ['users', 'people', 'ผู้ใช้งาน', 'Admin'],
   ].filter(i => !i[3] || can(i[3]));
   Swal.fire({
@@ -503,6 +504,11 @@ async function openStockCard(barcode) {
         <div><span>จุดสั่งซื้อ</span>${ropState}</div>
       </div>
       <div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
+        <div><span class="muted small">ตรวจนับล่าสุด</span><div>${c.lastCount ? `${lastCountHtml(c.lastCount)}` : lastCountHtml(null)}</div></div>
+        <div class="row-gap">${c.lastCount ? `<button class="btn btn-ghost btn-sm" id="sc-count"><i class="bi bi-clipboard-check"></i> ${esc(c.lastCount.countNo)}</button>` : ''}
+          <button class="btn btn-ghost btn-sm" id="sc-print"><i class="bi bi-printer"></i> พิมพ์ Stock Card</button></div>
+      </div>
+      <div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">
         <svg id="sc-barcode"></svg>
         <div class="row-gap">
           <button class="btn btn-ghost btn-sm" id="sc-dl"><i class="bi bi-download"></i> บาร์โค้ด</button>
@@ -523,6 +529,8 @@ async function openStockCard(barcode) {
         </tbody></table></div></div>`);
     try { JsBarcode('#sc-barcode', c.barcode, { format: 'CODE128', height: 46, fontSize: 13, margin: 0, background: 'transparent', lineColor: getComputedStyle(document.body).color }); } catch (e) { $('#sc-barcode').remove(); }
     $('#sc-dl').onclick = () => downloadBarcode(c.barcode);
+    $('#sc-print').onclick = () => askStockCards(c.barcode);
+    if ($('#sc-count')) $('#sc-count').onclick = () => openCount(c.lastCount.countNo);
     $$('#drawer-body [data-doc]').forEach(a => a.onclick = ev => { ev.preventDefault(); openDocument(a.dataset.doc); });
     $$('#drawer-body a[href^="#/move"]').forEach(a => a.addEventListener('click', closeDrawer));
   } catch (e) { closeDrawer(); fail(e); }
@@ -538,6 +546,7 @@ function downloadBarcode(bc) {
 }
 
 async function openDocument(docNo) {
+  if (/^CNT-/.test(docNo)) return openCount(docNo);          // เอกสารปรับยอดจากการตรวจนับ
   try {
     const d = await api('getDocument', docNo);
     if (!d) return fail(new Error('ไม่พบเอกสาร'));
@@ -1612,6 +1621,463 @@ $('#us-form').addEventListener('submit', async e => {
   } catch (e2) { err.textContent = e2.message; }
 });
 
+// ---------------------------------------------------------------- STOCK COUNT (ตรวจนับสต็อก)
+const CNT = { tab: 'history', list: null, sheet: null };
+const CF = { sheet: null, values: {}, notes: {}, photos: [], loadedWh: null };
+const photoCache = new Map();
+const cKey = (bc, lot, wh) => [bc, lot, wh || ''].join('|');
+const daysSince = d => d ? Math.round((new Date(isoDate() + 'T00:00:00') - new Date(String(d).slice(0, 10) + 'T00:00:00')) / 864e5) : null;
+const agoText = n => n === null ? '' : n <= 0 ? 'วันนี้' : n === 1 ? 'เมื่อวาน' : `${fmt(n)} วันก่อน`;
+// แสดง "นับล่าสุด" พร้อมสี: ≤ 30 วัน เขียว, ≤ 90 วัน ส้ม, เกิน/ไม่เคยนับ แดง
+function lastCountHtml(lc, withNo = false) {
+  if (!lc) return '<span class="last-none small"><i class="bi bi-dash-circle"></i> ยังไม่เคยนับ</span>';
+  const n = daysSince(lc.date), cls = n <= 30 ? 'last-ok' : n <= 90 ? 'last-old' : 'last-none';
+  return `<span class="${cls}">${fmtDate(lc.date)}</span><div class="small muted">${agoText(n)}${withNo && lc.countNo ? ' · ' + esc(lc.countNo) : ''}</div>`;
+}
+
+let cntFormOpen = false;
+async function renderCount({ params, changed, fromData }) {
+  const isForm = params.get('new') === '1' && can('Staff');
+  $('#cnt-list-view').classList.toggle('hidden', isForm);
+  $('#cnt-form-view').classList.toggle('hidden', !isForm);
+  $('#page-title').textContent = isForm ? 'บันทึกการตรวจนับ' : PAGES.count.title;
+  if (isForm) {
+    if (fromData && cntFormOpen && CF.sheet) return;          // รีเฟรชอัตโนมัติ: ไม่วาดฟอร์มใหม่ (กันช่องที่กำลังพิมพ์หาย)
+    const fresh = !cntFormOpen || changed; cntFormOpen = true;
+    return renderCountForm(fresh);
+  }
+  cntFormOpen = false;
+  $$('#cnt-tabs button').forEach(b => b.classList.toggle('active', b.dataset.v === CNT.tab));
+  if (changed || !CNT.list || !CNT.sheet) {
+    $('#cnt-table').innerHTML = empty('กำลังโหลด...', 'hourglass');
+    try { [CNT.list, CNT.sheet] = await Promise.all([api('getStockCounts'), api('getCountSheet', {})]); }
+    catch (e) { $('#cnt-table').innerHTML = empty(e.message, 'exclamation-circle'); return; }
+  }
+  const items = CNT.sheet.items, last = CNT.sheet.lastCount;
+  const never = items.filter(i => !i.lastCount).length, stale = items.filter(i => i.lastCount && daysSince(i.lastCount.date) > 30).length;
+  const month = CNT.list.filter(c => daysSince(c.date) <= 30).length;
+  $('#cnt-kpis').innerHTML = `
+    <div class="kpi k-blue"><span class="kpi-label"><i class="bi bi-calendar-check"></i> นับสต็อกล่าสุด</span>
+      <span class="kpi-value">${last ? fmtDate(last.date) : '-'}</span><span class="kpi-foot">${last ? `${agoText(daysSince(last.date))} · โดย ${esc(last.user)} · ${esc(last.countNo)}` : 'ยังไม่เคยบันทึกการนับ'}</span></div>
+    <div class="kpi"><span class="kpi-label"><i class="bi bi-clipboard-data"></i> นับใน 30 วันล่าสุด</span>
+      <span class="kpi-value">${fmt(month)}<small>ครั้ง</small></span><span class="kpi-foot">ทั้งหมด ${fmt(CNT.list.length)} ครั้ง</span></div>
+    <div class="kpi k-warn"><span class="kpi-label"><i class="bi bi-hourglass-bottom"></i> นับเกิน 30 วันแล้ว</span>
+      <span class="kpi-value">${fmt(stale)}<small>Lot</small></span><span class="kpi-foot">ควรนับรอบถัดไป</span></div>
+    <div class="kpi k-crit"><span class="kpi-label"><i class="bi bi-question-octagon"></i> ยังไม่เคยนับ</span>
+      <span class="kpi-value">${fmt(never)}<small>Lot</small></span><span class="kpi-foot">จาก ${fmt(items.length)} Lot ที่มีของ</span></div>`;
+  if (CNT.tab === 'history') {
+    $('#cnt-table').innerHTML = CNT.list.length ? `<div class="table-wrap"><table class="tbl"><thead><tr><th>เลขที่ใบนับ</th><th>วันที่นับ</th><th>คลัง</th><th class="num">รายการ</th><th class="num">ไม่ตรงระบบ</th><th class="num">รูป</th><th>ปรับยอด</th><th>ผู้นับ</th><th></th></tr></thead><tbody>
+      ${CNT.list.map(c => `<tr class="clickable" data-cnt="${esc(c.countNo)}"><td class="mono strong">${esc(c.countNo)}</td><td class="nowrap">${fmtDate(c.date)}<div class="small muted">${agoText(daysSince(c.date))}</div></td>
+        <td><span class="tag-wh">${esc(c.warehouse || 'ทุกคลัง')}</span></td><td class="num">${c.items}</td>
+        <td class="num ${c.diffs ? 'diff-neg' : 'diff-zero'}">${c.diffs ? fmt(c.diffs) : '<i class="bi bi-check2"></i> ตรง'}</td>
+        <td class="num">${c.photos ? `<i class="bi bi-image"></i> ${c.photos}` : '<span class="muted">-</span>'}</td>
+        <td>${c.adjusted ? '<span class="badge plain t-IN">ปรับแล้ว</span>' : '<span class="muted small">เก็บหลักฐาน</span>'}</td>
+        <td>${esc(c.user)}${c.note ? `<div class="small muted">${esc(c.note)}</div>` : ''}</td><td class="num"><i class="bi bi-chevron-right muted"></i></td></tr>`).join('')}
+      </tbody></table></div>` : empty('ยังไม่มีการบันทึกการนับ — กด "บันทึกการนับใหม่" เพื่อเริ่ม', 'clipboard-check');
+    $$('#cnt-table [data-cnt]').forEach(r => r.onclick = () => openCount(r.dataset.cnt));
+  } else {
+    const age = i => i.lastCount ? daysSince(i.lastCount.date) : 1e9;   // ยังไม่เคยนับ / นับนานสุด ขึ้นก่อน
+    const rows = [...items].sort((a, b) => age(b) - age(a) || a.name.localeCompare(b.name, 'th'));
+    $('#cnt-table').innerHTML = rows.length ? `<div class="table-wrap"><table class="tbl"><thead><tr><th>สินค้า</th><th>Lot</th><th>วันหมดอายุ</th><th>คลัง</th><th class="num">ยอดในระบบ</th><th>นับล่าสุด</th></tr></thead><tbody>
+      ${rows.map(i => `<tr class="clickable" data-bc="${esc(i.barcode)}"><td class="prod-cell"><strong>${esc(i.name)}</strong><small class="mono">${esc(i.barcode)}</small></td>
+        <td class="mono">${esc(i.lot)}</td><td class="nowrap">${fmtDate(i.exp)}</td><td><span class="tag-wh">${esc(i.warehouse || '-')}</span></td>
+        <td class="num qty-strong">${fmt(i.qty)}</td><td class="nowrap">${lastCountHtml(i.lastCount, true)}</td></tr>`).join('')}
+      </tbody></table></div>` : empty('ไม่มีสินค้าคงคลัง', 'box-seam');
+    $$('#cnt-table [data-bc]').forEach(r => r.onclick = () => openStockCard(r.dataset.bc));
+  }
+}
+$$('#cnt-tabs button').forEach(b => b.addEventListener('click', () => { CNT.tab = b.dataset.v; renderCount({ params: new URLSearchParams() }); }));
+
+// ----- ฟอร์มบันทึกการนับ
+async function renderCountForm(changed) {
+  const sel = $('#cf-wh');
+  if (changed) {
+    if (!Object.keys(CF.values).length) CF.sheet = null;      // เข้าฟอร์มใหม่และยังไม่ได้กรอก → โหลดยอดล่าสุด
+    if (!$('#cf-date').value) $('#cf-date').value = isoDate();
+    $('#cf-date').max = isoDate();
+    const v = sel.value;
+    sel.innerHTML = '<option value="">ทุกคลัง</option>' + S.warehouses.map(w => `<option>${esc(w)}</option>`).join('');
+    if (S.warehouses.includes(v)) sel.value = v;
+  }
+  if (!CF.sheet || CF.loadedWh !== sel.value) {
+    $('#cf-table').innerHTML = empty('กำลังโหลดรายการสินค้า...', 'hourglass');
+    try { CF.sheet = await api('getCountSheet', { warehouse: sel.value }); CF.loadedWh = sel.value; }
+    catch (e) { $('#cf-table').innerHTML = empty(e.message, 'exclamation-circle'); return; }
+  }
+  const last = CF.sheet.lastCount;
+  $('#cf-last').innerHTML = `<i class="bi bi-clock-history"></i> <span>นับสต็อกล่าสุด${sel.value ? ` (${esc(sel.value)})` : ''}: ${last
+    ? `<b>${fmtDate(last.date)}</b> — ${agoText(daysSince(last.date))} โดย ${esc(last.user)} <a href="#" id="cf-last-open" class="mono">${esc(last.countNo)}</a>`
+    : '<b>ยังไม่เคยนับ</b>'}</span>`;
+  if ($('#cf-last-open')) $('#cf-last-open').onclick = e => { e.preventDefault(); openCount(last.countNo); };
+  const items = CF.sheet.items;
+  $('#cf-table').innerHTML = items.length ? `<div class="table-wrap"><table class="tbl"><thead><tr><th>#</th><th>สินค้า</th><th>Lot / หมดอายุ</th><th>คลัง</th><th>นับล่าสุด</th><th class="num">ยอดในระบบ</th><th class="num">นับได้</th><th class="num">ผลต่าง</th></tr></thead><tbody>
+    ${items.map((i, n) => { const k = cKey(i.barcode, i.lot, i.warehouse); return `<tr data-k="${esc(k)}" data-n="${n}" data-search="${esc([i.name, i.barcode, i.lot].join(' ').toLowerCase())}">
+      <td class="muted">${n + 1}</td><td class="prod-cell"><strong>${esc(i.name)}</strong><small class="mono">${esc(i.barcode)}</small></td>
+      <td class="nowrap"><span class="mono">${esc(i.lot)}</span><div class="small muted">${fmtDate(i.exp)}</div></td><td><span class="tag-wh">${esc(i.warehouse || '-')}</span></td>
+      <td class="nowrap">${lastCountHtml(i.lastCount)}</td><td class="num">${fmt(i.qty)}</td>
+      <td class="num"><input class="input cnt-input" type="number" inputmode="decimal" min="0" step="any" data-cnt-in="${n}" value="${esc(CF.values[k] ?? '')}"></td>
+      <td class="num" data-diff="${n}"></td></tr>`; }).join('')}
+    </tbody></table></div>` : empty(sel.value ? 'คลังนี้ไม่มีสินค้าคงเหลือ' : 'ไม่มีสินค้าคงคลัง', 'box-seam');
+  $$('#cf-table [data-cnt-in]').forEach(inp => inp.addEventListener('input', () => { const i = items[inp.dataset.cntIn]; CF.values[cKey(i.barcode, i.lot, i.warehouse)] = inp.value; updateCountRow(+inp.dataset.cntIn); updateCountSummary(); }));
+  items.forEach((_, n) => updateCountRow(n));
+  filterCountRows(); updateCountSummary(); renderCountPhotos();
+}
+function updateCountRow(n) {
+  const i = CF.sheet.items[n], v = CF.values[cKey(i.barcode, i.lot, i.warehouse)], cell = $(`#cf-table [data-diff="${n}"]`);
+  if (!cell) return;
+  const has = v !== undefined && v !== '';
+  cell.closest('tr').classList.toggle('counted', has);
+  if (!has) { cell.innerHTML = '<span class="muted">-</span>'; return; }
+  const d = Math.round((num(v) - i.qty) * 100) / 100;
+  cell.innerHTML = d === 0 ? '<span class="diff-zero"><i class="bi bi-check2"></i> ตรง</span>' : `<span class="${d > 0 ? 'diff-pos' : 'diff-neg'}">${d > 0 ? '+' : '−'}${fmt(Math.abs(d))}</span>`;
+}
+function countedItems() {
+  return CF.sheet ? CF.sheet.items.filter(i => { const v = CF.values[cKey(i.barcode, i.lot, i.warehouse)]; return v !== undefined && v !== ''; }) : [];
+}
+function updateCountSummary() {
+  const done = countedItems(), diffs = done.filter(i => Math.round((num(CF.values[cKey(i.barcode, i.lot, i.warehouse)]) - i.qty) * 100) !== 0).length;
+  $('#cf-summary').innerHTML = `นับแล้ว <b>${done.length}</b> / ${CF.sheet ? CF.sheet.items.length : 0} Lot${diffs ? ` · <span class="diff-neg">ไม่ตรงระบบ ${diffs}</span>` : ''}`;
+}
+function filterCountRows() {
+  const q = $('#cf-q').value.trim().toLowerCase();
+  $$('#cf-table tr[data-search]').forEach(tr => { tr.style.display = !q || tr.dataset.search.includes(q) ? '' : 'none'; });
+}
+$('#cf-q').addEventListener('input', debounce(filterCountRows, 120));
+$('#cf-wh').addEventListener('change', () => renderCountForm(false));
+$('#cf-fill').addEventListener('click', () => {
+  let n = 0;
+  $$('#cf-table [data-cnt-in]').forEach(inp => {
+    if (inp.value !== '' || inp.closest('tr').style.display === 'none') return;
+    const i = CF.sheet.items[inp.dataset.cntIn]; inp.value = i.qty; CF.values[cKey(i.barcode, i.lot, i.warehouse)] = String(i.qty); updateCountRow(+inp.dataset.cntIn); n++;
+  });
+  updateCountSummary(); toast(n ? `เติมยอดตามระบบ ${n} รายการ — แก้เฉพาะรายการที่นับได้ไม่ตรง` : 'ไม่มีช่องว่างให้เติม', n ? 'success' : 'info');
+});
+
+// ----- รูปหลักฐาน: ย่อด้านยาวสุด 1600px เป็น JPEG และพิมพ์วันเวลาถ่าย/ผู้แนบลงมุมรูป
+function compressPhoto(file, maxSide = 1600) {
+  return new Promise((resolve, reject) => {
+    if (!/^image\//.test(file.type)) return reject(new Error(`${file.name}: ไม่ใช่ไฟล์รูป`));
+    if (file.size > 30 * 1024 * 1024) return reject(new Error(`${file.name}: ไฟล์ใหญ่เกิน 30 MB`));
+    const url = URL.createObjectURL(file), img = new Image();
+    img.onload = () => {
+      const s = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+      const w = Math.round(img.naturalWidth * s), h = Math.round(img.naturalHeight * s);
+      const c = document.createElement('canvas'); c.width = w; c.height = h;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h); ctx.drawImage(img, 0, 0, w, h);
+      URL.revokeObjectURL(url);
+      const when = new Date(file.lastModified || Date.now());
+      const stamp = `${when.toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' })} ${when.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })} · ${S.session.displayName || S.session.username}`;
+      const fs = Math.max(14, Math.round(w / 45));
+      ctx.font = `600 ${fs}px 'IBM Plex Sans Thai', sans-serif`;
+      const tw = ctx.measureText(stamp).width;
+      ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.fillRect(w - tw - fs * 1.4, h - fs * 2, tw + fs * 1.4, fs * 2);
+      ctx.fillStyle = '#fff'; ctx.textBaseline = 'middle'; ctx.fillText(stamp, w - tw - fs * 0.7, h - fs);
+      let q = 0.8, data = c.toDataURL('image/jpeg', q);
+      while (data.length > 850000 && q > 0.35) { q -= 0.1; data = c.toDataURL('image/jpeg', q); }
+      if (data.length > 850000) return reject(new Error(`${file.name}: รูปใหญ่เกินไป`));
+      resolve(data);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error(`${file.name}: เปิดไฟล์รูปไม่ได้ (ถ้าเป็น HEIC ให้ตั้งกล้องเป็น JPG)`)); };
+    img.src = url;
+  });
+}
+function renderCountPhotos() {
+  $('#cf-photos').innerHTML = CF.photos.map((p, n) => `<div class="photo-tile" data-ph="${n}"><img src="${p.data}" alt=""><button class="ph-del" data-ph-del="${n}" title="ลบรูป"><i class="bi bi-x-lg"></i></button>${p.caption ? `<span class="ph-cap">${esc(p.caption)}</span>` : ''}</div>`).join('')
+    + (CF.photos.length < 12 ? '<button class="photo-add" id="cf-add-photo" type="button"><i class="bi bi-camera"></i>ถ่าย / เลือกรูป</button>' : '');
+  if ($('#cf-add-photo')) $('#cf-add-photo').onclick = () => $('#cf-file').click();
+  $$('#cf-photos [data-ph-del]').forEach(b => b.onclick = e => { e.stopPropagation(); CF.photos.splice(+b.dataset.phDel, 1); renderCountPhotos(); });
+  $$('#cf-photos [data-ph]').forEach(t => t.onclick = () => viewPhoto(CF.photos[t.dataset.ph].data, CF.photos[t.dataset.ph].caption));
+}
+async function pickPhotos(files, room) {
+  const out = [], errs = [];
+  for (const f of [...files].slice(0, room)) { try { out.push({ data: await compressPhoto(f), caption: '' }); } catch (e) { errs.push(e.message); } }
+  if (files.length > room) errs.push(`เลือกเกินจำนวนที่แนบได้ — ใช้ ${room} รูปแรก`);
+  if (errs.length) Swal.fire({ icon: 'warning', title: 'บางรูปใช้ไม่ได้', html: errs.map(esc).join('<br>') });
+  return out;
+}
+$('#cf-file').addEventListener('change', async e => {
+  const files = e.target.files; if (!files.length) return;
+  loading('กำลังย่อรูป...');
+  const got = await pickPhotos(files, 12 - CF.photos.length);
+  if (Swal.isLoading()) Swal.close();
+  CF.photos.push(...got); e.target.value = ''; renderCountPhotos();
+});
+function viewPhoto(data, caption) {
+  Swal.fire({ imageUrl: data, imageAlt: caption || 'รูปหลักฐาน', title: caption || '', showCloseButton: true, showConfirmButton: false, width: 'min(920px, 96vw)', padding: '12px' });
+}
+async function uploadCountPhotos(countNo, photos) {
+  let ok = 0;
+  for (let n = 0; n < photos.length; n++) {
+    Swal.update({ title: `กำลังอัปโหลดรูป ${n + 1} / ${photos.length}` }); Swal.showLoading();
+    try { const r = await api('addCountPhoto', countNo, photos[n].data, photos[n].caption); if (r.success) ok++; else throw new Error(r.message); }
+    catch (e) { console.warn(e); }
+  }
+  return ok;
+}
+
+$('#cf-save').addEventListener('click', async () => {
+  const done = countedItems();
+  if (!done.length) return Swal.fire({ icon: 'warning', title: 'ยังไม่ได้กรอกจำนวนที่นับได้', text: 'กรอกจำนวนในช่อง "นับได้" อย่างน้อย 1 รายการ' });
+  const bad = done.find(i => !(num(CF.values[cKey(i.barcode, i.lot, i.warehouse)]) >= 0) || CF.values[cKey(i.barcode, i.lot, i.warehouse)] < 0);
+  if (bad) return Swal.fire({ icon: 'warning', title: 'จำนวนไม่ถูกต้อง', text: `${bad.name} Lot ${bad.lot}` });
+  const adjust = $('#cf-adjust').checked;
+  const diffs = done.filter(i => Math.round((num(CF.values[cKey(i.barcode, i.lot, i.warehouse)]) - i.qty) * 100) !== 0);
+  const r = await Swal.fire({
+    icon: 'question', title: 'บันทึกผลการนับ?',
+    html: `<div class="swal-left">นับ <b>${done.length}</b> Lot · ไม่ตรงระบบ <b>${diffs.length}</b> · รูปหลักฐาน <b>${CF.photos.length}</b> รูป<br>
+      ${adjust && diffs.length ? `<span class="diff-neg">ระบบจะปรับยอด ${diffs.length} รายการให้เท่ากับที่นับได้</span>` : 'ยอดในระบบจะไม่เปลี่ยน (เก็บเป็นหลักฐาน)'}
+      ${!CF.photos.length ? '<br><span class="muted">ยังไม่ได้แนบรูป (แนบเพิ่มทีหลังได้)</span>' : ''}</div>`,
+    showCancelButton: true, confirmButtonText: 'บันทึก', cancelButtonText: 'กลับไปแก้ไข',
+  });
+  if (!r.isConfirmed) return;
+  loading('กำลังบันทึก...');
+  try {
+    const res = await api('saveStockCount', { date: $('#cf-date').value, warehouse: $('#cf-wh').value, note: $('#cf-note').value.trim(), adjust,
+      items: done.map(i => ({ barcode: i.barcode, name: i.name, lot: i.lot, exp: i.exp, warehouse: i.warehouse, countedQty: num(CF.values[cKey(i.barcode, i.lot, i.warehouse)]) })) });
+    if (!res.success) return Swal.fire({ icon: 'error', title: 'บันทึกไม่สำเร็จ', text: res.message });
+    const sent = CF.photos.length ? await uploadCountPhotos(res.countNo, CF.photos) : 0;
+    const lost = CF.photos.length - sent;
+    Object.assign(CF, { sheet: null, values: {}, notes: {}, photos: [], loadedWh: null });
+    $('#cf-note').value = ''; $('#cf-adjust').checked = false; $('#cf-date').value = '';
+    CNT.list = null; CNT.sheet = null;
+    if (res.adjusted) loadAll(true);
+    await Swal.fire({ icon: lost ? 'warning' : 'success', title: `บันทึก ${res.countNo} แล้ว`,
+      html: `${res.count} Lot · ไม่ตรงระบบ ${res.diffs}${res.adjusted ? ` · ปรับยอดแล้ว ${res.adjusted} รายการ` : ''}<br>รูปหลักฐาน ${sent} รูป${lost ? ` <span class="diff-neg">(อัปโหลดไม่สำเร็จ ${lost} รูป — แนบใหม่ได้ในหน้ารายละเอียด)</span>` : ''}` });
+    location.hash = '#/count';
+    await new Promise(ok => setTimeout(ok, 80));             // รอ hashchange (ซึ่งปิด drawer) ก่อนเปิดรายละเอียด
+    openCount(res.countNo);
+  } catch (e) { fail(e); }
+});
+
+// ----- รายละเอียดใบนับ
+async function getPhoto(id) {
+  if (!photoCache.has(id)) photoCache.set(id, api('getCountPhoto', id).then(p => p ? p.data : '').catch(() => ''));
+  return photoCache.get(id);
+}
+async function openCount(countNo) {
+  openDrawer('กำลังโหลด...', '', '<div class="empty"><i class="bi bi-hourglass"></i>กำลังโหลดข้อมูล</div>');
+  let c;
+  try { c = await api('getStockCount', countNo); } catch (e) { closeDrawer(); return fail(e); }
+  if (!c) { openDrawer('ไม่พบใบนับ', '', empty('ใบนับนี้อาจถูกลบไปแล้ว')); return; }
+  const diffs = c.items.filter(i => i.diff !== 0);
+  const mine = p => can('Admin') || p.user === S.session.username;
+  openDrawer(c.countNo, `<i class="bi bi-clipboard-check"></i> ${fmtDate(c.date)} · ${esc(c.warehouse || 'ทุกคลัง')} · โดย ${esc(c.user)}`, `
+    <div class="dl">
+      <div><span>วันที่นับ</span><b>${fmtDate(c.date)}</b><div class="small muted">${agoText(daysSince(c.date))}</div></div>
+      <div><span>จำนวนที่นับ</span><b>${c.items.length} Lot</b></div>
+      <div><span>ไม่ตรงระบบ</span><b class="${diffs.length ? 'diff-neg' : 'diff-zero'}">${diffs.length ? diffs.length + ' Lot' : 'ตรงทั้งหมด'}</b></div>
+    </div>
+    <div class="card"><div class="small muted">สถานะ</div><div>${c.adjusted ? '<b>ปรับยอดในระบบตามที่นับได้แล้ว</b>' : 'เก็บเป็นหลักฐาน (ไม่ได้ปรับยอด)'}</div>
+      ${c.note ? `<div class="small muted" style="margin-top:8px">หมายเหตุ</div><div>${esc(c.note)}</div>` : ''}<div class="small muted" style="margin-top:8px">บันทึกเมื่อ ${fmtTs(c.ts)}</div></div>
+    <div class="card"><div class="card-head"><h3><i class="bi bi-images"></i> รูปหลักฐาน (${c.photos.length})</h3></div>
+      <div class="photo-grid" id="cd-photos">
+        ${c.photos.map(p => `<div class="photo-tile" data-pid="${esc(p.id)}"><img alt="" data-src="${esc(p.id)}">${can('Staff') && mine(p) ? `<button class="ph-del" data-pdel="${esc(p.id)}" title="ลบรูป"><i class="bi bi-x-lg"></i></button>` : ''}<span class="ph-cap">${esc(p.caption || p.user + ' · ' + fmtTs(p.ts))}</span></div>`).join('')}
+        ${can('Staff') && c.photos.length < c.maxPhotos ? '<button class="photo-add" id="cd-add" type="button"><i class="bi bi-camera"></i>เพิ่มรูป</button>' : ''}
+        ${!c.photos.length && !can('Staff') ? '<span class="muted small">ไม่มีรูปหลักฐาน</span>' : ''}
+      </div><input type="file" id="cd-file" accept="image/*" multiple hidden></div>
+    <div class="card p0"><div class="card-head pad"><h3>รายการที่นับ</h3></div>
+      <div class="table-wrap"><table class="tbl"><thead><tr><th>สินค้า</th><th>Lot</th><th>คลัง</th><th class="num">ระบบ</th><th class="num">นับได้</th><th class="num">ผลต่าง</th></tr></thead><tbody>
+        ${c.items.map(i => `<tr><td class="prod-cell"><strong>${esc(i.name)}</strong><small class="mono">${esc(i.barcode)}</small></td><td class="mono">${esc(i.lot)}<div class="small muted">${fmtDate(i.exp)}</div></td>
+          <td><span class="tag-wh">${esc(i.warehouse || '-')}</span></td><td class="num">${fmt(i.systemQty)}</td><td class="num qty-strong">${fmt(i.countedQty)}</td>
+          <td class="num">${i.diff === 0 ? '<span class="diff-zero"><i class="bi bi-check2"></i></span>' : `<span class="${i.diff > 0 ? 'diff-pos' : 'diff-neg'}">${i.diff > 0 ? '+' : '−'}${fmt(Math.abs(i.diff))}</span>`}</td></tr>`).join('')}
+      </tbody></table></div></div>
+    <button class="btn btn-dark btn-block" id="cd-print"><i class="bi bi-printer"></i> พิมพ์รายงานผลการตรวจนับ (PDF)</button>
+    ${can('Admin') ? `<button class="btn btn-danger-ghost btn-block" id="cd-del"><i class="bi bi-trash3"></i> ลบใบนับนี้</button>` : ''}`);
+  $$('#cd-photos img[data-src]').forEach(async img => { img.src = await getPhoto(img.dataset.src) || ''; });
+  $$('#cd-photos [data-pid]').forEach(t => t.onclick = async () => { const p = c.photos.find(x => x.id === t.dataset.pid); viewPhoto(await getPhoto(p.id), p.caption || `${p.user} · ${fmtTs(p.ts)}`); });
+  $$('#cd-photos [data-pdel]').forEach(b => b.onclick = async e => {
+    e.stopPropagation();
+    const ok = await Swal.fire({ icon: 'warning', title: 'ลบรูปนี้?', text: 'ลบแล้วกู้คืนไม่ได้', showCancelButton: true, confirmButtonText: 'ลบ', cancelButtonText: 'ยกเลิก' });
+    if (!ok.isConfirmed) return;
+    try { const r = await api('deleteCountPhoto', b.dataset.pdel); if (!r.success) return Swal.fire({ icon: 'error', title: r.message }); photoCache.delete(b.dataset.pdel); CNT.list = null; toast('ลบรูปแล้ว'); openCount(c.countNo); } catch (er) { fail(er); }
+  });
+  if ($('#cd-add')) $('#cd-add').onclick = () => $('#cd-file').click();
+  if ($('#cd-file')) $('#cd-file').onchange = async e => {
+    const files = e.target.files; if (!files.length) return;
+    loading('กำลังย่อรูป...');
+    const got = await pickPhotos(files, c.maxPhotos - c.photos.length);
+    if (!got.length) return;
+    loading('กำลังอัปโหลด...');
+    const sent = await uploadCountPhotos(c.countNo, got);
+    CNT.list = null;
+    await Swal.fire({ icon: sent === got.length ? 'success' : 'warning', title: `แนบรูปแล้ว ${sent} / ${got.length} รูป` });
+    openCount(c.countNo);
+  };
+  $('#cd-print').onclick = () => printCountReport(c);
+  if ($('#cd-del')) $('#cd-del').onclick = async () => {
+    const ok = await Swal.fire({ icon: 'warning', title: `ลบใบนับ ${c.countNo}?`,
+      html: `รายการนับและรูปหลักฐาน ${c.photos.length} รูปจะถูกลบถาวร กู้คืนไม่ได้${c.adjusted ? '<br><b class="diff-neg">ใบนี้เคยปรับยอด — การปรับยอดจะถูกยกเลิกด้วย</b>' : ''}`,
+      showCancelButton: true, confirmButtonText: 'ลบถาวร', cancelButtonText: 'ยกเลิก', confirmButtonColor: '#a53c33' });
+    if (!ok.isConfirmed) return;
+    try { const r = await api('deleteStockCount', c.countNo); if (!r.success) return Swal.fire({ icon: 'error', title: r.message });
+      closeDrawer(); CNT.list = null; CNT.sheet = null; toast(r.message); if (c.adjusted) loadAll(true); if (currentPage === 'count') renderCount({ params: new URLSearchParams() });
+    } catch (er) { fail(er); }
+  };
+}
+
+// ----- พิมพ์ใบนับสต็อก (แบบฟอร์มสำหรับเดินนับ)
+$('#cnt-print-sheet').addEventListener('click', async () => {
+  const r = await Swal.fire({
+    title: 'พิมพ์ใบนับสต็อก',
+    html: `<div class="form-grid swal-left">
+      <label class="field"><span>คลังสินค้า</span><select class="select" id="ps-wh"><option value="">ทุกคลัง</option>${S.warehouses.map(w => `<option>${esc(w)}</option>`).join('')}</select></label>
+      <label class="check"><input type="checkbox" id="ps-sys"> แสดงยอดในระบบในใบนับ</label>
+      <p class="hint"><i class="bi bi-info-circle"></i> แนะนำให้ไม่แสดงยอดในระบบ (นับแบบไม่เห็นยอด) เพื่อให้ได้จำนวนที่นับจริง แล้วนำผลมากรอกในเมนูนี้</p></div>`,
+    showCancelButton: true, confirmButtonText: '<i class="bi bi-printer"></i> สร้าง PDF', cancelButtonText: 'ยกเลิก', focusConfirm: false,
+    preConfirm: () => ({ wh: $('#ps-wh').value, sys: $('#ps-sys').checked }),
+  });
+  if (!r.isConfirmed) return;
+  try { loading('กำลังเตรียมข้อมูล...'); printCountSheet(await api('getCountSheet', { warehouse: r.value.wh }), r.value.sys); } catch (e) { fail(e); }
+});
+const PC = 'font-size:10px;padding:5px 6px;border:1px solid #cfc6b6;vertical-align:middle';
+const PH = 'font-size:10px;padding:6px;border:1px solid #cfc6b6;background:#ece4d6;font-weight:700';
+const signBlock = labels => `<div style="display:flex;justify-content:space-around;margin-top:34px;font-size:11px;text-align:center">
+  ${labels.map(x => `<div><div style="border-bottom:1px dotted #464b53;width:170px;height:28px"></div><div style="margin-top:6px">(${'.'.repeat(44)})</div><div style="margin-top:4px">${x}</div><div style="color:#858a92;margin-top:2px">วันที่ ____/____/______</div></div>`).join('')}</div>`;
+function paginate(rows, first, rest) { const out = []; let i = 0, n = first; do { out.push(rows.slice(i, i + n)); i += n; n = rest; } while (i < rows.length); return out; }
+function printCountSheet(sheet, showSys) {
+  const last = sheet.lastCount;
+  const cols = ['#', 'บาร์โค้ด', 'ชื่อสินค้า', 'Lot', 'วันหมดอายุ', 'นับล่าสุด', ...(showSys ? ['ยอดในระบบ'] : []), 'นับได้', 'ผลต่าง', 'หมายเหตุ'];
+  const w = ['4%', '13%', showSys ? '22%' : '28%', '10%', '9%', '9%', ...(showSys ? ['8%'] : []), '9%', '7%', '9%'];
+  const th = `<tr>${cols.map((c, i) => `<th style="${PH};width:${w[i]};text-align:${i === 0 || i >= cols.length - 3 ? 'center' : 'left'}">${c}</th>`).join('')}</tr>`;
+  const rows = sheet.items.map((i, n) => `<tr><td style="${PC};text-align:center">${n + 1}</td><td style="${PC};font-family:monospace">${esc(i.barcode)}</td><td style="${PC}"><b>${esc(i.name)}</b></td>
+    <td style="${PC}">${esc(i.lot)}</td><td style="${PC}">${fmtDate(i.exp)}</td><td style="${PC};${!i.lastCount ? 'color:#a53c33' : ''}">${i.lastCount ? fmtDate(i.lastCount.date) : 'ยังไม่เคยนับ'}</td>
+    ${showSys ? `<td style="${PC};text-align:right">${fmt(i.qty)}</td>` : ''}<td style="${PC};height:22px"></td><td style="${PC}"></td><td style="${PC}"></td></tr>`);
+  for (let k = 0; k < 5; k++) rows.push(`<tr>${cols.map(() => `<td style="${PC};height:22px"></td>`).join('')}</tr>`);
+  const info = `<table style="width:100%;border-collapse:collapse;margin-bottom:12px;font-size:11px"><tr>
+    <td style="${PC};width:25%"><span style="color:#858a92">คลังสินค้า</span><br><b>${esc(sheet.warehouse || 'ทุกคลัง')}</b></td>
+    <td style="${PC};width:25%"><span style="color:#858a92">วันที่นับ</span><br>____/____/______</td>
+    <td style="${PC};width:25%"><span style="color:#858a92">เวลาเริ่ม – เสร็จ</span><br>______ : ______ น.</td>
+    <td style="${PC};width:25%;background:#faf8f4"><span style="color:#858a92">นับสต็อกล่าสุด</span><br><b>${last ? `${fmtDate(last.date)} (${agoText(daysSince(last.date))})` : 'ยังไม่เคยนับ'}</b>${last ? `<br><span style="font-size:9px;color:#858a92">${esc(last.countNo)} · ${esc(last.user)}</span>` : ''}</td></tr></table>`;
+  const pages = paginate(rows, 20, 27);
+  const body = pages.map((p, n) => `${n ? '<div class="html2pdf__page-break"></div>' : ''}<table style="width:100%;border-collapse:collapse"><thead>${th}</thead><tbody>${p.join('')}</tbody></table>`).join('');
+  const html = pdfHeader('ใบตรวจนับสต็อกสินค้า', `${sheet.warehouse || 'ทุกคลัง'} · ${sheet.items.length} รายการ`) + info + body
+    + `<div style="font-size:10px;color:#464b53;margin-top:10px">วิธีนับ: นับของจริงทีละ Lot เขียนจำนวนในช่อง "นับได้" · ถ้าพบ Lot ที่ไม่มีในรายการ ให้เขียนเพิ่มในแถวว่าง · ถ่ายรูปชั้นวาง/ใบนับเก็บเป็นหลักฐาน แล้วบันทึกผลในเมนู ตรวจนับสต็อก</div>`
+    + signBlock(['ผู้นับ', 'ผู้ตรวจนับร่วม / ผู้ตรวจสอบ', 'ผู้อนุมัติ']);
+  renderPdf(html, `ใบนับสต็อก_${sheet.warehouse || 'ทุกคลัง'}`, 'portrait');
+}
+// ----- พิมพ์รายงานผลการนับ (พร้อมรูปหลักฐาน)
+async function printCountReport(c) {
+  loading('กำลังเตรียมรูป...');
+  const imgs = await Promise.all(c.photos.map(p => getPhoto(p.id)));
+  const diffs = c.items.filter(i => i.diff !== 0);
+  const cols = ['#', 'บาร์โค้ด', 'ชื่อสินค้า', 'Lot', 'วันหมดอายุ', 'คลัง', 'ยอดในระบบ', 'นับได้', 'ผลต่าง'];
+  const th = `<tr>${cols.map((x, i) => `<th style="${PH};text-align:${i >= 6 ? 'right' : 'left'}">${x}</th>`).join('')}</tr>`;
+  const rows = c.items.map((i, n) => `<tr><td style="${PC}">${n + 1}</td><td style="${PC};font-family:monospace">${esc(i.barcode)}</td><td style="${PC}"><b>${esc(i.name)}</b></td><td style="${PC}">${esc(i.lot)}</td>
+    <td style="${PC}">${fmtDate(i.exp)}</td><td style="${PC}">${esc(i.warehouse)}</td><td style="${PC};text-align:right">${fmt(i.systemQty)}</td><td style="${PC};text-align:right"><b>${fmt(i.countedQty)}</b></td>
+    <td style="${PC};text-align:right;font-weight:700;color:${i.diff > 0 ? '#2b5486' : i.diff < 0 ? '#a53c33' : '#4a7a62'}">${i.diff === 0 ? 'ตรง' : (i.diff > 0 ? '+' : '−') + fmt(Math.abs(i.diff))}</td></tr>`);
+  const pages = paginate(rows, 20, 28);
+  const kpi = (l, v) => `<div style="flex:1;border:1px solid #e6e0d5;background:#faf8f4;border-radius:6px;padding:8px 10px"><div style="font-size:9px;color:#858a92">${l}</div><div style="font-size:14px;font-weight:700">${v}</div></div>`;
+  let html = pdfHeader('รายงานผลการตรวจนับสต็อก', `เลขที่ ${c.countNo}`)
+    + `<div style="display:flex;gap:8px;margin-bottom:10px">${kpi('วันที่นับ', fmtDate(c.date))}${kpi('คลัง', esc(c.warehouse || 'ทุกคลัง'))}${kpi('ผู้นับ', esc(c.user))}${kpi('จำนวนที่นับ', c.items.length + ' Lot')}${kpi('ไม่ตรงระบบ', diffs.length + ' Lot')}</div>`
+    + `<div style="font-size:11px;margin-bottom:10px"><b>สถานะ:</b> ${c.adjusted ? 'ปรับยอดในระบบตามที่นับได้แล้ว' : 'เก็บเป็นหลักฐาน (ไม่ได้ปรับยอด)'}${c.note ? ` · <b>หมายเหตุ:</b> ${esc(c.note)}` : ''}</div>`
+    + pages.map((p, n) => `${n ? '<div class="html2pdf__page-break"></div>' : ''}<table style="width:100%;border-collapse:collapse"><thead>${th}</thead><tbody>${p.join('')}</tbody></table>`).join('')
+    + signBlock(['ผู้นับ', 'ผู้ตรวจสอบ', 'ผู้อนุมัติ']);
+  if (imgs.some(Boolean)) {
+    html += '<div class="html2pdf__page-break"></div><div style="font-size:14px;font-weight:700;margin-bottom:10px">รูปหลักฐานการตรวจนับ</div>';
+    const pairs = paginate(c.photos.map((p, n) => ({ p, src: imgs[n] })).filter(x => x.src), 4, 4);
+    html += pairs.map((grp, n) => `${n ? '<div class="html2pdf__page-break"></div>' : ''}<div style="display:flex;flex-wrap:wrap;gap:10px">${grp.map(x => `<div style="width:calc(50% - 5px);border:1px solid #e6e0d5;border-radius:6px;padding:6px;box-sizing:border-box">
+      <img src="${x.src}" style="width:100%;height:330px;object-fit:contain;background:#f4f1ea;display:block"><div style="font-size:9px;color:#464b53;margin-top:4px">${esc(x.p.caption || '')} แนบโดย ${esc(x.p.user)} · ${fmtTs(x.p.ts)}</div></div>`).join('')}</div>`).join('');
+  }
+  renderPdf(html, c.countNo, 'portrait');
+}
+
+// ----- Stock Card (บัตรคุมสินค้า) — ใบคุมสินค้ารายตัว
+$('#cnt-print-cards').addEventListener('click', () => askStockCards());
+async function askStockCards(barcode) {
+  const prods = [...S.products].sort((a, b) => a.name.localeCompare(b.name, 'th'));
+  const r = await Swal.fire({
+    title: 'พิมพ์ Stock Card (บัตรคุมสินค้า)',
+    html: `<div class="form-grid swal-left">
+      <label class="field"><span>สินค้า</span><select class="select" id="sk-prod">
+        ${barcode ? '' : '<option value="__stock">ทุกสินค้าที่มีของคงเหลือ</option><option value="__all">ทุกสินค้าในระบบ</option>'}
+        ${prods.map(p => `<option value="${esc(p.barcode)}" ${p.barcode === barcode ? 'selected' : ''}>${esc(p.name)} (${esc(p.barcode)})</option>`).join('')}</select></label>
+      <div class="field"><span>รูปแบบ</span>
+        <label class="check"><input type="radio" name="sk-mode" value="history" checked> พร้อมประวัติรับ–จ่ายจากระบบ (+ แถวว่างไว้เขียนต่อ)</label>
+        <label class="check"><input type="radio" name="sk-mode" value="blank"> แบบฟอร์มเปล่า สำหรับเขียนมือแขวนที่ชั้นวาง</label></div></div>`,
+    showCancelButton: true, confirmButtonText: '<i class="bi bi-printer"></i> สร้าง PDF', cancelButtonText: 'ยกเลิก', focusConfirm: false,
+    preConfirm: () => ({ sel: $('#sk-prod').value, mode: ($('input[name="sk-mode"]:checked') || {}).value || 'history' }),
+  });
+  if (!r.isConfirmed) return;
+  const { sel, mode } = r.value;
+  let list = sel === '__all' ? prods.map(p => p.barcode) : sel === '__stock' ? [...new Set(S.inventory.map(i => i.barcode))] : [sel];
+  list = list.filter(Boolean);
+  if (!list.length) return Swal.fire({ icon: 'info', title: 'ไม่มีสินค้าให้พิมพ์' });
+  if (list.length > 150) return Swal.fire({ icon: 'warning', title: `สินค้า ${list.length} รายการ มากเกินไปสำหรับไฟล์เดียว`, text: 'เลือกเป็นรายสินค้า หรือ "ทุกสินค้าที่มีของคงเหลือ"' });
+  const cards = [];
+  if (mode === 'blank') {
+    const nameOf = new Map(S.products.map(p => [p.barcode, p.name]));
+    for (const bc of list) {
+      const inv = S.inventory.filter(i => i.barcode === bc);
+      const rp = S.reorderPoints.find(x => x.name === nameOf.get(bc));
+      cards.push({ barcode: bc, name: nameOf.get(bc) || (inv[0] || {}).name || bc, category: (inv[0] || {}).category || '', lots: inv, moves: [], counts: [],
+        reorderPoint: rp ? rp.reorderPoint : 0, minStock: rp ? rp.minStock : 0, safetyStock: rp ? rp.safetyStock : 0, total: null, lastCount: null });
+    }
+  } else {
+    loading(`กำลังโหลดข้อมูล 0 / ${list.length}`);
+    let done = 0;
+    for (let i = 0; i < list.length; i += 4) {
+      const part = await Promise.all(list.slice(i, i + 4).map(bc => api('getStockCard', bc).catch(() => null)));
+      part.forEach(c => c && cards.push(c)); done += part.length;
+      Swal.update({ title: `กำลังโหลดข้อมูล ${done} / ${list.length}` }); Swal.showLoading();
+    }
+    if (!cards.length) return Swal.fire({ icon: 'info', title: 'สินค้าที่เลือกยังไม่มีการเคลื่อนไหว', text: 'ลองเลือกแบบฟอร์มเปล่า' });
+  }
+  cards.sort((a, b) => a.name.localeCompare(b.name, 'th'));
+  const html = cards.map((c, n) => (n ? '<div class="html2pdf__page-break"></div>' : '') + stockCardHtml(c, mode === 'blank')).join('');
+  renderPdf(html, cards.length === 1 ? `StockCard_${cards[0].barcode}` : `StockCard_${cards.length}รายการ`, 'portrait');
+}
+function stockCardHtml(c, blank) {
+  const box = (l, v, wd = '25%') => `<td style="${PC};width:${wd}"><span style="color:#858a92;font-size:9px">${l}</span><br><b>${v}</b></td>`;
+  const whs = [...new Set((c.lots || []).filter(l => l.qty > 0).map(l => l.warehouse).filter(Boolean))].join(', ');
+  const lc = c.lastCount;
+  const head = `<div style="display:flex;justify-content:space-between;align-items:flex-end;border-bottom:2px solid #1a1c20;padding-bottom:8px;margin-bottom:10px">
+      <div style="display:flex;gap:10px;align-items:center"><img src="https://i.postimg.cc/ZnZBK2JR/logo.png" crossorigin="anonymous" style="width:40px;height:40px;object-fit:contain">
+        <div><div style="font-size:15px;font-weight:700">บัตรคุมสินค้า (Stock Card)</div><div style="font-size:9.5px;color:#6f604a">คลินิกเทคนิคการแพทย์ซิสเตอร์ ศูนย์ระยอง · SistersLabStock</div></div></div>
+      <div style="text-align:right;font-size:9px;color:#858a92">${blank ? 'แบบฟอร์มสำหรับบันทึกด้วยมือ' : `พิมพ์จากระบบ ${new Date().toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' })}`}<br>แผ่นที่ ______</div></div>
+    <table style="width:100%;border-collapse:collapse;margin-bottom:10px"><tr>${box('ชื่อสินค้า', esc(c.name), '40%')}${box('รหัส / บาร์โค้ด', `<span style="font-family:monospace">${esc(c.barcode)}</span>`)}${box('หมวดหมู่', esc(c.category || '-'), '20%')}${box('หน่วยนับ', '__________', '15%')}</tr>
+      <tr>${box('สถานที่จัดเก็บ / คลัง', esc(whs || '______________'), '40%')}${box('จุดสั่งซื้อ (ROP)', c.reorderPoint ? fmt(c.reorderPoint) : '______')}${box('สต็อกขั้นต่ำ / Safety', `${c.minStock ? fmt(c.minStock) : '____'} / ${c.safetyStock ? fmt(c.safetyStock) : '____'}`, '20%')}${box('สต็อกสูงสุด', '______', '15%')}</tr>
+      ${blank ? '' : `<tr>${box('คงเหลือปัจจุบัน (ตามระบบ)', fmt(c.total), '40%')}<td colspan="3" style="${PC};background:#faf8f4"><span style="color:#858a92;font-size:9px">ตรวจนับล่าสุด</span><br><b>${lc ? `${fmtDate(lc.date)} (${agoText(daysSince(lc.date))}) · ${esc(lc.countNo)} · โดย ${esc(lc.user)}` : 'ยังไม่เคยนับ'}</b></td></tr>`}</table>`;
+  const cols = ['วันที่', 'เลขที่เอกสาร', 'รายการ (รับจาก / จ่ายให้)', 'Lot', 'วันหมดอายุ', 'รับ', 'จ่าย', 'คงเหลือ', 'ผู้บันทึก'];
+  const wd = ['10%', '14%', '20%', '10%', '10%', '8%', '8%', '9%', '11%'];
+  const th = `<tr>${cols.map((x, i) => `<th style="${PH};width:${wd[i]};text-align:${i >= 5 && i <= 7 ? 'right' : 'left'}">${x}</th>`).join('')}</tr>`;
+  const td = (v, r) => `<td style="${PC};${r ? 'text-align:right' : ''}">${v}</td>`;
+  const rows = [];
+  if (!blank) {
+    // เรียงเก่า → ใหม่ คำนวณยอดคงเหลือรวม · ในวันเดียวกัน: รับ/จ่ายปกติ → แถวตรวจนับ → รายการปรับยอดจากการนับ
+    const rank = e => e.kind === 'c' ? 1 : /^CNT-/.test(e.docNo || '') ? 2 : 0;
+    const ev = [...c.moves].reverse().map((m, k) => ({ ...m, k, kind: 'm' }))
+      .concat((c.counts || []).map((x, k) => ({ ...x, k, kind: 'c' })))
+      .sort((a, b) => a.date.localeCompare(b.date) || rank(a) - rank(b) || a.k - b.k);
+    let bal = 0;
+    for (const e of ev) {
+      if (e.kind === 'm') {
+        bal = Math.round((bal + (e.type === 'IN' ? e.qty : -e.qty)) * 100) / 100;
+        const what = e.note || (e.type === 'IN' ? 'รับเข้า' : 'เบิกออก') + (e.warehouse ? ` (${e.warehouse})` : '');
+        rows.push(`<tr>${td(fmtDate(e.date))}${td(`<span style="font-family:monospace;font-size:9px">${esc(e.docNo || '-')}</span>`)}${td(esc(what))}${td(esc(e.lot))}${td(fmtDate(e.exp))}
+          ${td(e.type === 'IN' ? fmt(e.qty) : '', 1)}${td(e.type === 'OUT' ? fmt(e.qty) : '', 1)}${td(`<b>${fmt(bal)}</b>`, 1)}${td(esc(e.user || ''))}</tr>`);
+      } else {
+        const d = Math.round((e.countedQty - e.systemQty) * 100) / 100;
+        rows.push(`<tr style="background:#eef3f9">${td(fmtDate(e.date))}${td(`<span style="font-family:monospace;font-size:9px">${esc(e.countNo)}</span>`)}
+          <td colspan="3" style="${PC}"><b>ตรวจนับ</b> Lot ${esc(e.lot)}: ระบบ ${fmt(e.systemQty)} / นับได้ <b>${fmt(e.countedQty)}</b> ${d === 0 ? '✓ ตรง' : `(${d > 0 ? '+' : '−'}${fmt(Math.abs(d))})`}</td>
+          ${td('', 1)}${td('', 1)}${td('', 1)}${td(esc(e.user || ''))}</tr>`);
+      }
+    }
+  } else {
+    rows.push(`<tr>${td('')}${td('')}${td('<b>ยอดยกมา</b>')}${td('')}${td('')}${td('', 1)}${td('', 1)}${td('', 1)}${td('')}</tr>`);
+  }
+  const blankRow = `<tr>${cols.map(() => `<td style="${PC};height:21px"></td>`).join('')}</tr>`;
+  const firstCap = blank ? 26 : 22, restCap = 32;
+  // เติมแถวว่างให้เต็มหน้าสุดท้าย (อย่างน้อย 6 แถวสำหรับเขียนต่อ)
+  let fill = 6; const totalRows = rows.length + fill;
+  const capAt = n => n <= firstCap ? firstCap : firstCap + Math.ceil((n - firstCap) / restCap) * restCap;
+  fill += capAt(totalRows) - totalRows;
+  for (let k = 0; k < fill; k++) rows.push(blankRow);
+  const pages = paginate(rows, firstCap, restCap);
+  return head + pages.map((p, n) => `${n ? '<div class="html2pdf__page-break"></div>' : ''}<table style="width:100%;border-collapse:collapse"><thead>${th}</thead><tbody>${p.join('')}</tbody></table>`).join('')
+    + `<div style="display:flex;justify-content:space-between;margin-top:10px;font-size:9.5px;color:#464b53"><span>หมายเหตุ: บันทึกทุกครั้งที่รับ/จ่าย · ตรวจนับและลงชื่อทุกเดือน</span><span>ผู้ตรวจสอบ ............................ วันที่ ____/____/______</span></div>`;
+}
+
 // ---------------------------------------------------------------- PDF
 const PDF_STATUS = { 'Normal': ['#e7efe9', '#4a7a62'], 'Warning': ['#f5eedb', '#9a7319'], 'Near Expiry': ['#f6e7dc', '#b05f2a'], 'Critical': ['#f5e2df', '#a53c33'], 'Expired': ['#1a1c20', '#ffffff'] };
 const pdfBadge = s => `<span style="background:${PDF_STATUS[s][0]};color:${PDF_STATUS[s][1]};padding:2px 8px;border-radius:10px;font-size:9px;font-weight:600;white-space:nowrap">${STATUS[s].th}</span>`;
@@ -1690,6 +2156,7 @@ function onRemoteChange(p) {
   RT.timer = setTimeout(async () => {
     if (!S.session) return;
     docsCache = null; rpData = currentPage === 'report' ? rpData : null;
+    CNT.list = null; CNT.sheet = null;
     await loadAll(true);
     if (currentPage === 'docs') renderDocs({});
     if (currentPage === 'report') loadReport();
