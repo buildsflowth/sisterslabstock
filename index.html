@@ -42,10 +42,10 @@
     <form class="login-form" id="login-form" autocomplete="on">
       <img src="https://i.postimg.cc/ZnZBK2JR/logo.png" alt="" class="login-logo-sm">
       <h2>เข้าสู่ระบบ</h2>
-      <p class="muted">กรอกชื่อผู้ใช้และรหัสผ่านของคุณ</p>
+      <p class="muted">กรอกอีเมลและรหัสผ่านของคุณ</p>
       <label class="field">
-        <span>ชื่อผู้ใช้</span>
-        <input class="input" id="login-user" autocomplete="username" required>
+        <span>อีเมล</span>
+        <input class="input" id="login-user" type="text" inputmode="email" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="name@example.com" required>
       </label>
       <label class="field">
         <span>รหัสผ่าน</span>
@@ -56,6 +56,7 @@
       </label>
       <div class="form-error" id="login-error"></div>
       <button class="btn btn-primary btn-lg btn-block" type="submit" id="login-submit">เข้าสู่ระบบ</button>
+      <button type="button" class="btn btn-ghost btn-block" id="login-forgot"><i class="bi bi-key"></i> ลืมรหัสผ่าน?</button>
       <button type="button" class="btn btn-ghost btn-block install-app-btn hidden"><i class="bi bi-download"></i> ติดตั้งแอปลงเครื่อง</button>
     </form>
   </div>
@@ -399,10 +400,9 @@
           <div class="card">
             <div class="card-head"><h3>สร้างบัญชีผู้ใช้ใหม่</h3></div>
             <form id="us-form" class="form-grid">
-              <label class="field"><span>ชื่อผู้ใช้ (Username) <em class="req">*</em></span><input class="input" id="us-username" autocomplete="off"></label>
+              <label class="field"><span>อีเมล (ใช้เข้าสู่ระบบ) <em class="req">*</em></span><input class="input" id="us-email" type="email" autocomplete="off" placeholder="example@email.com"></label>
               <label class="field"><span>รหัสผ่าน <em class="req">*</em></span><input class="input" id="us-password" type="password" autocomplete="new-password" placeholder="อย่างน้อย 6 ตัวอักษร"></label>
               <label class="field"><span>ชื่อที่แสดง <em class="req">*</em></span><input class="input" id="us-display"></label>
-              <label class="field"><span>อีเมล</span><input class="input" id="us-email" type="email" placeholder="example@email.com"></label>
               <div class="field"><span>บทบาท</span>
                 <div class="role-cards" id="us-role">
                   <label><input type="radio" name="role" value="Admin"><span><strong>Admin</strong><small>ใช้ได้ทุกเมนู</small></span></label>
@@ -416,6 +416,7 @@
             </form>
           </div>
           <div class="stack">
+            <div class="card" id="us-mail"></div>
             <div class="card p0">
               <div class="card-head pad"><h3>ผู้ใช้งานทั้งหมด</h3></div>
               <div id="us-table"></div>
