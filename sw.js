@@ -1,6 +1,6 @@
 // Service Worker: ทำให้ติดตั้งเป็นแอปได้ และเปิดหน้าแอปได้เร็ว/เปิดได้แม้เน็ตหลุดชั่วคราว
 // ข้อมูลสต็อก (/api/...) จะดึงจากเซิร์ฟเวอร์เสมอ ไม่เก็บแคช
-const VERSION = 'v10';
+const VERSION = 'v11';
 const SHELL = `shell-${VERSION}`;
 const CDN = `cdn-${VERSION}`;
 const SHELL_FILES = ['./', './index.html', './config.js', './assets/app.css', './assets/app.js', './manifest.webmanifest',
