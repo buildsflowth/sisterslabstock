@@ -1478,12 +1478,69 @@ function drawReport() {
     <div class="kpi k-beige"><span class="kpi-label"><i class="bi bi-plus-slash-minus"></i> สุทธิ</span><span class="kpi-value">${tin - tout >= 0 ? '+' : ''}${fmt(tin - tout)}</span></div>
     <div class="kpi"><span class="kpi-label"><i class="bi bi-list-ul"></i> จำนวนรายการ</span><span class="kpi-value">${fmt(rows.length)}</span></div>`;
   $('#rp-summary').textContent = `${fmtDate($('#rp-start').value)} – ${fmtDate($('#rp-end').value)}`;
-  $('#rp-table').innerHTML = rows.length ? `<div class="table-wrap"><table class="tbl"><thead><tr><th>วันที่</th><th>ประเภท</th><th>สินค้า</th><th>Lot</th><th>วันหมดอายุ</th><th>คลัง</th><th class="num">จำนวน</th><th class="num">คงเหลือ</th><th>ผู้ทำรายการ</th></tr></thead><tbody>
+  const admin = can('Admin');
+  const acts = r => !admin || !r.id ? '' : /^CNT-/.test(r.docNo) ? '<td class="muted small nowrap" title="แก้ไขที่เมนูตรวจนับสต็อก">ตรวจนับ</td>'
+    : `<td class="nowrap"><button class="btn btn-ghost btn-sm" data-rp-edit="${esc(r.id)}" title="แก้ไขรายการ"><i class="bi bi-pencil-square"></i></button>
+      <button class="btn btn-ghost btn-sm" data-rp-del="${esc(r.id)}" title="ลบรายการ" style="color:var(--out)"><i class="bi bi-trash3"></i></button></td>`;
+  $('#rp-table').innerHTML = rows.length ? `<div class="table-wrap"><table class="tbl"><thead><tr><th>วันที่</th><th>ประเภท</th><th>สินค้า</th><th>Lot</th><th>วันหมดอายุ</th><th>คลัง</th><th class="num">จำนวน</th><th class="num">คงเหลือ</th><th>ผู้ทำรายการ</th>${admin ? '<th></th>' : ''}</tr></thead><tbody>
     ${rows.map(r => `<tr><td class="nowrap">${fmtDate(r.date)}${r.docNo ? `<div class="small"><a href="#" data-doc="${esc(r.docNo)}">${esc(r.docNo)}</a></div>` : ''}</td><td>${typeBadge(r.type)}</td>
       <td class="prod-cell"><strong>${esc(r.name)}</strong><small class="mono">${esc(r.barcode)}</small></td><td class="mono">${esc(r.lot)}</td><td class="nowrap">${fmtDate(r.exp)}</td><td><span class="tag-wh">${esc(r.warehouse || '-')}</span></td>
-      <td class="num qty-strong" style="color:${r.type === 'IN' ? 'var(--blue)' : 'var(--out)'}">${r.type === 'IN' ? '+' : '−'}${fmt(r.qty)}</td><td class="num">${fmt(r.balance)}</td><td>${esc(r.user)}${r.note ? `<div class="small muted">${esc(r.note)}</div>` : ''}</td></tr>`).join('')}
+      <td class="num qty-strong" style="color:${r.type === 'IN' ? 'var(--blue)' : 'var(--out)'}">${r.type === 'IN' ? '+' : '−'}${fmt(r.qty)}</td><td class="num">${fmt(r.balance)}</td><td>${esc(r.user)}${r.note ? `<div class="small muted">${esc(r.note)}</div>` : ''}</td>${admin ? acts(r) || '<td></td>' : ''}</tr>`).join('')}
     </tbody></table></div>` : empty('ไม่มีรายการในช่วงเวลานี้', 'calendar-x');
   $$('#rp-table [data-doc]').forEach(a => a.onclick = e => { e.preventDefault(); openDocument(a.dataset.doc); });
+  const byId = id => (rpData || []).find(r => r.id === id);
+  $$('#rp-table [data-rp-edit]').forEach(b => b.onclick = () => editTxRow(byId(b.dataset.rpEdit)));
+  $$('#rp-table [data-rp-del]').forEach(b => b.onclick = () => deleteTxRow(byId(b.dataset.rpDel)));
+}
+
+// แก้ไข / ลบรายการเดียวจากรายงานความเคลื่อนไหว (Admin)
+async function saveTxRow(payload, okMsg) {
+  loading('กำลังบันทึก...');
+  try {
+    const r = await api('updateTransaction', payload);
+    if (!r.success) return Swal.fire({ icon: 'error', title: okMsg + 'ไม่สำเร็จ', text: r.message });
+    docsCache = null;
+    await loadAll(true);
+    await loadReport();
+    Swal.close(); toast(r.message);
+  } catch (e) { fail(e); }
+}
+async function editTxRow(r) {
+  if (!r) return;
+  const whOpts = [...new Set([...S.warehouses, r.warehouse].filter(Boolean))].map(w => `<option ${w === r.warehouse ? 'selected' : ''}>${esc(w)}</option>`).join('');
+  const res = await Swal.fire({
+    title: `แก้ไขรายการ${r.type === 'IN' ? 'รับเข้า' : 'เบิกออก'}`,
+    html: `<div class="swal-left">
+      <div class="prod-cell" style="margin-bottom:10px"><strong>${esc(r.name)}</strong><small class="mono">${esc(r.barcode)}${r.docNo ? ` · ${esc(r.docNo)}` : ''}</small></div>
+      <div class="form-grid">
+        <label class="field"><span>วันที่</span><input class="input" type="date" id="tx-date" value="${esc(r.date)}" max="${isoDate()}"></label>
+        <label class="field"><span>จำนวน</span><input class="input" type="number" inputmode="decimal" min="0" step="any" id="tx-qty" value="${esc(r.qty)}"></label>
+        <label class="field"><span>Lot</span><input class="input mono" id="tx-lot" value="${esc(r.lot)}"></label>
+        <label class="field"><span>วันหมดอายุ</span><input class="input" type="date" id="tx-exp" value="${esc(r.exp || '')}"></label>
+        <label class="field"><span>คลัง</span><select class="select" id="tx-wh">${whOpts}</select></label>
+        <label class="field"><span>หมายเหตุ</span><input class="input" id="tx-note" value="${esc(r.note || '')}"></label>
+      </div>
+      <p class="hint"><i class="bi bi-info-circle"></i> ยอดคงเหลือจะคำนวณใหม่ทันที · ระบบไม่ยอมให้แก้ถ้าทำให้ Lot ใดติดลบ · มีบันทึกในประวัติการใช้งาน</p></div>`,
+    showCancelButton: true, confirmButtonText: 'บันทึกการแก้ไข', cancelButtonText: 'ยกเลิก',
+    preConfirm: () => {
+      const v = { id: r.id, date: $('#tx-date').value, qty: num($('#tx-qty').value), lot: $('#tx-lot').value.trim(), exp: $('#tx-exp').value,
+        warehouse: $('#tx-wh').value, note: $('#tx-note').value.trim() };
+      if (!v.date) return Swal.showValidationMessage('กรุณาระบุวันที่');
+      if (!(v.qty > 0)) return Swal.showValidationMessage('จำนวนต้องมากกว่า 0 (ถ้าไม่ใช้รายการนี้ให้กดลบ)');
+      if (!v.lot) return Swal.showValidationMessage('กรุณาระบุ Lot');
+      if (r.type === 'IN' && !v.exp) return Swal.showValidationMessage('กรุณาระบุวันหมดอายุ');
+      return v;
+    },
+  });
+  if (res.isConfirmed) saveTxRow(res.value, 'แก้ไข');
+}
+async function deleteTxRow(r) {
+  if (!r) return;
+  const ok = await Swal.fire({ icon: 'warning', title: 'ลบรายการนี้?',
+    html: `<div class="swal-left">${typeBadge(r.type)} ${fmtDate(r.date)}${r.docNo ? ` · ${esc(r.docNo)}` : ''}<br><b>${esc(r.name)}</b> Lot ${esc(r.lot)} · ${r.type === 'IN' ? '+' : '−'}${fmt(r.qty)}
+      <br>ยอด${r.type === 'IN' ? 'รับเข้า' : 'เบิกออก'}นี้จะถูกย้อนกลับ <b class="diff-neg">กู้คืนไม่ได้</b> (มีบันทึกในประวัติการใช้งาน)</div>`,
+    showCancelButton: true, confirmButtonText: 'ลบรายการ', cancelButtonText: 'ยกเลิก', confirmButtonColor: '#c0392b' });
+  if (ok.isConfirmed) saveTxRow({ id: r.id, remove: true }, 'ลบ');
 }
 $('#rp-presets').addEventListener('click', e => { const b = e.target.closest('button'); if (b) { setPreset(b.dataset.v); loadReport(); } });
 ['#rp-start', '#rp-end'].forEach(id => $(id).addEventListener('change', () => { $$('#rp-presets button').forEach(x => x.classList.remove('active')); loadReport(); }));
