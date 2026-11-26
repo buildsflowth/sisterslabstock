@@ -562,9 +562,68 @@ async function openDocument(docNo) {
         ${d.items.map((i, n) => `<tr><td class="muted">${n + 1}</td><td class="prod-cell"><strong>${esc(i.name)}</strong><small class="mono">${esc(i.barcode)}</small></td>
           <td class="mono">${esc(i.lot)}</td><td class="nowrap">${fmtDate(i.exp)}</td><td><span class="tag-wh">${esc(i.warehouse || '-')}</span></td><td class="num qty-strong">${fmt(i.qty)}</td></tr>`).join('')}
       </tbody></table></div></div>
-      <button class="btn btn-dark btn-block" id="doc-print"><i class="bi bi-printer"></i> พิมพ์ใบ${d.type === 'IN' ? 'รับ' : 'เบิก'}สินค้า (PDF)</button>`);
+      <button class="btn btn-dark btn-block" id="doc-print"><i class="bi bi-printer"></i> พิมพ์ใบ${d.type === 'IN' ? 'รับ' : 'เบิก'}สินค้า (PDF)</button>
+      ${can('Admin') ? '<button class="btn btn-ghost btn-block" id="doc-edit"><i class="bi bi-pencil-square"></i> แก้ไขเอกสารนี้ (ย้อนหลัง)</button>' : ''}`);
     $('#doc-print').onclick = () => printDocSlip(d);
+    if ($('#doc-edit')) $('#doc-edit').onclick = () => editDocument(d);
   } catch (e) { fail(e); }
+}
+
+// แก้ไขเอกสารรับเข้า/เบิกออกที่บันทึกแล้ว (Admin) — แก้วันที่ จำนวน Lot วันหมดอายุ คลัง หมายเหตุ หรือลบบางบรรทัด
+function editDocument(d) {
+  const rows = d.items.map(i => ({ ...i, removed: false }));
+  const whOpts = v => [...new Set([...S.warehouses, v].filter(Boolean))].map(w => `<option ${w === v ? 'selected' : ''}>${esc(w)}</option>`).join('');
+  openDrawer(`แก้ไข ${d.docNo}`, `${typeBadge(d.type)} &nbsp;บันทึกเดิม ${fmtDate(d.date)} · โดย ${esc(d.user)}`, `
+    <div class="card">
+      <label class="field"><span>วันที่เอกสาร</span><input class="input" type="date" id="de-date" value="${esc(d.date)}" max="${isoDate()}"></label>
+      <p class="hint"><i class="bi bi-info-circle"></i> แก้แล้วยอดคงเหลือและ Stock Card จะคำนวณใหม่ตามวันที่ ระบบจะไม่ยอมให้แก้ถ้าทำให้ Lot ใดติดลบ · ทุกการแก้ไขถูกบันทึกในประวัติการใช้งาน</p>
+    </div>
+    <div id="de-rows"></div>
+    <button class="btn btn-primary btn-block" id="de-save"><i class="bi bi-check2-circle"></i> บันทึกการแก้ไข</button>
+    <button class="btn btn-ghost btn-block" id="de-cancel">ยกเลิก กลับไปดูเอกสาร</button>
+    <button class="btn btn-danger-ghost btn-block" id="de-void"><i class="bi bi-x-octagon"></i> ยกเลิกทั้งเอกสาร (ลบทุกรายการ)</button>`);
+  const draw = () => {
+    $('#de-rows').innerHTML = rows.map((r, n) => `<div class="card" data-n="${n}"${r.removed ? ' style="opacity:.6"' : ''}>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px"><div class="prod-cell"><strong>${n + 1}. ${esc(r.name)}</strong><small class="mono">${esc(r.barcode)}</small></div>
+        <button class="btn btn-ghost btn-sm" data-de-del="${n}">${r.removed ? '<i class="bi bi-arrow-counterclockwise"></i> เอากลับ' : '<i class="bi bi-trash3"></i> ลบบรรทัด'}</button></div>
+      ${r.removed ? '<div class="small diff-neg">บรรทัดนี้จะถูกลบเมื่อกดบันทึก</div>' : `<div class="form-grid">
+        <label class="field"><span>จำนวน</span><input class="input" type="number" inputmode="decimal" min="0" step="any" data-f="qty" value="${esc(r.qty)}"></label>
+        <label class="field"><span>Lot</span><input class="input mono" data-f="lot" value="${esc(r.lot)}"></label>
+        <label class="field"><span>วันหมดอายุ</span><input class="input" type="date" data-f="exp" value="${esc(r.exp || '')}"></label>
+        <label class="field"><span>คลัง</span><select class="select" data-f="warehouse">${whOpts(r.warehouse)}</select></label>
+        <label class="field" style="grid-column:1/-1"><span>หมายเหตุ</span><input class="input" data-f="note" value="${esc(r.note || '')}"></label></div>`}</div>`).join('');
+    $$('#de-rows [data-f]').forEach(inp => inp.addEventListener('input', () => { rows[inp.closest('[data-n]').dataset.n][inp.dataset.f] = inp.value; }));
+    $$('#de-rows [data-de-del]').forEach(b => b.onclick = () => { const r = rows[b.dataset.deDel]; r.removed = !r.removed; draw(); });
+  };
+  draw();
+  const submit = async (items, confirmHtml, confirmText) => {
+    const ok = await Swal.fire({ icon: 'warning', title: confirmText, html: confirmHtml, showCancelButton: true, confirmButtonText: 'ยืนยัน', cancelButtonText: 'กลับไปแก้ไข' });
+    if (!ok.isConfirmed) return;
+    loading('กำลังบันทึก...');
+    try {
+      const r = await api('updateDocument', { docNo: d.docNo, date: $('#de-date').value, items });
+      if (!r.success) return Swal.fire({ icon: 'error', title: 'แก้ไขไม่สำเร็จ', text: r.message });
+      docsCache = null;
+      await loadAll(true);
+      Swal.close(); toast(r.message);
+      if (currentPage === 'docs') renderDocs({});
+      if (r.cancelled) closeDrawer(); else openDocument(d.docNo);
+    } catch (e) { fail(e); }
+  };
+  $('#de-cancel').onclick = () => openDocument(d.docNo);
+  $('#de-save').onclick = () => {
+    const keep = rows.filter(r => !r.removed);
+    if (!keep.length) return $('#de-void').click();
+    const bad = keep.find(r => !(num(r.qty) > 0) || !String(r.lot).trim() || (d.type === 'IN' && !r.exp));
+    if (bad) return Swal.fire({ icon: 'warning', title: 'ข้อมูลไม่ครบ', text: `${bad.name}: ต้องมีจำนวนมากกว่า 0 และ Lot${d.type === 'IN' ? ' และวันหมดอายุ' : ''}` });
+    const before = d.items.reduce((s, i) => s + i.qty, 0), after = keep.reduce((s, r) => s + num(r.qty), 0);
+    const removed = rows.length - keep.length;
+    submit(keep.map(r => ({ id: r.id, qty: num(r.qty), lot: String(r.lot).trim(), exp: r.exp || '', warehouse: r.warehouse, note: r.note || '' })),
+      `<div class="swal-left">${$('#de-date').value !== d.date ? `วันที่: ${fmtDate(d.date)} → <b>${fmtDate($('#de-date').value)}</b><br>` : ''}
+        รวมจำนวน: ${fmt(before)} → <b>${fmt(after)}</b>${removed ? `<br><span class="diff-neg">ลบ ${removed} บรรทัด</span>` : ''}
+        <br><span class="muted small">ยอดคงเหลือจะถูกคำนวณใหม่ทันที</span></div>`, `บันทึกการแก้ไข ${d.docNo}?`);
+  };
+  $('#de-void').onclick = () => submit([], `<div class="swal-left">ลบทุกรายการในเอกสารนี้ (${d.items.length} บรรทัด) ยอด${d.type === 'IN' ? 'รับเข้า' : 'เบิกออก'}จะถูกย้อนกลับ<br><b class="diff-neg">กู้คืนไม่ได้</b> (มีบันทึกในประวัติการใช้งาน)</div>`, `ยกเลิกเอกสาร ${d.docNo}?`);
 }
 
 // ---------------------------------------------------------------- DASHBOARD
