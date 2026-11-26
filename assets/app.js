@@ -2051,14 +2051,39 @@ async function askStockCards(barcode) {
       <label class="field"><span>สินค้า</span><select class="select" id="sk-prod">
         ${barcode ? '' : '<option value="__stock">ทุกสินค้าที่มีของคงเหลือ</option><option value="__all">ทุกสินค้าในระบบ</option>'}
         ${prods.map(p => `<option value="${esc(p.barcode)}" ${p.barcode === barcode ? 'selected' : ''}>${esc(p.name)} (${esc(p.barcode)})</option>`).join('')}</select></label>
+      <label class="field"><span>ช่วงเวลา</span><select class="select" id="sk-period">
+        <option value="all">ทั้งหมด (ตั้งแต่เริ่มบันทึก)</option><option value="month">รายเดือน</option><option value="range">เลือกช่วงวันที่</option></select></label>
+      <label class="field hidden" id="sk-month-wrap"><span>เดือน</span><input class="input" type="month" id="sk-month" value="${isoDate().slice(0, 7)}" max="${isoDate().slice(0, 7)}"></label>
+      <div class="field hidden" id="sk-range-wrap"><span>ช่วงวันที่</span>
+        <div style="display:flex;gap:8px;align-items:center"><input class="input" type="date" id="sk-from" value="${isoDate().slice(0, 8)}01" max="${isoDate()}"><span>ถึง</span><input class="input" type="date" id="sk-to" value="${isoDate()}" max="${isoDate()}"></div></div>
+      <p class="hint"><i class="bi bi-info-circle"></i> เลือกรายเดือน/ช่วงวันที่: บรรทัดแรกเป็นยอดยกมา ณ วันเริ่มต้น แล้วแสดงเฉพาะรายการในช่วงนั้น</p>
       <div class="field"><span>รูปแบบ</span>
         <label class="check"><input type="radio" name="sk-mode" value="history" checked> พร้อมประวัติรับ–จ่ายจากระบบ (+ แถวว่างไว้เขียนต่อ)</label>
         <label class="check"><input type="radio" name="sk-mode" value="blank"> แบบฟอร์มเปล่า สำหรับเขียนมือแขวนที่ชั้นวาง</label></div></div>`,
     showCancelButton: true, confirmButtonText: '<i class="bi bi-printer"></i> สร้าง PDF', cancelButtonText: 'ยกเลิก', focusConfirm: false,
-    preConfirm: () => ({ sel: $('#sk-prod').value, mode: ($('input[name="sk-mode"]:checked') || {}).value || 'history' }),
+    didOpen: () => {
+      const sync = () => { const v = $('#sk-period').value; $('#sk-month-wrap').classList.toggle('hidden', v !== 'month'); $('#sk-range-wrap').classList.toggle('hidden', v !== 'range'); };
+      $('#sk-period').addEventListener('change', sync); sync();
+    },
+    preConfirm: () => {
+      const v = $('#sk-period').value;
+      let period = null;
+      if (v === 'month') {
+        const m = $('#sk-month').value;
+        if (!/^[0-9]{4}-[0-9]{2}$/.test(m)) return Swal.showValidationMessage('กรุณาเลือกเดือน');
+        const [y, mo] = m.split('-').map(Number), last = new Date(y, mo, 0).getDate();
+        period = { from: `${m}-01`, to: `${m}-${pad(last)}`, label: new Date(y, mo - 1, 1).toLocaleDateString('th-TH', { month: 'long', year: 'numeric' }), tag: m };
+      } else if (v === 'range') {
+        const from = $('#sk-from').value, to = $('#sk-to').value;
+        if (!from || !to) return Swal.showValidationMessage('กรุณาเลือกวันที่เริ่มต้นและวันที่สิ้นสุด');
+        if (from > to) return Swal.showValidationMessage('วันที่เริ่มต้นต้องไม่หลังวันที่สิ้นสุด');
+        period = { from, to, label: `${fmtDate(from)} – ${fmtDate(to)}`, tag: `${from}_${to}` };
+      }
+      return { sel: $('#sk-prod').value, mode: ($('input[name="sk-mode"]:checked') || {}).value || 'history', period };
+    },
   });
   if (!r.isConfirmed) return;
-  const { sel, mode } = r.value;
+  const { sel, mode, period } = r.value;
   let list = sel === '__all' ? prods.map(p => p.barcode) : sel === '__stock' ? [...new Set(S.inventory.map(i => i.barcode))] : [sel];
   list = list.filter(Boolean);
   if (!list.length) return Swal.fire({ icon: 'info', title: 'ไม่มีสินค้าให้พิมพ์' });
@@ -2083,45 +2108,57 @@ async function askStockCards(barcode) {
     if (!cards.length) return Swal.fire({ icon: 'info', title: 'สินค้าที่เลือกยังไม่มีการเคลื่อนไหว', text: 'ลองเลือกแบบฟอร์มเปล่า' });
   }
   cards.sort((a, b) => a.name.localeCompare(b.name, 'th'));
-  const html = cards.map((c, n) => (n ? '<div class="html2pdf__page-break"></div>' : '') + stockCardHtml(c, mode === 'blank')).join('');
-  renderPdf(html, cards.length === 1 ? `StockCard_${cards[0].barcode}` : `StockCard_${cards.length}รายการ`, 'portrait');
+  const html = cards.map((c, n) => (n ? '<div class="html2pdf__page-break"></div>' : '') + stockCardHtml(c, mode === 'blank', period)).join('');
+  const tag = period ? `_${period.tag}` : '';
+  renderPdf(html, cards.length === 1 ? `StockCard_${cards[0].barcode}${tag}` : `StockCard_${cards.length}รายการ${tag}`, 'portrait');
 }
-function stockCardHtml(c, blank) {
+// period = null (ทั้งหมด) หรือ { from, to, label } — แสดงยอดยกมา ณ วันเริ่มต้น แล้วเฉพาะรายการในช่วงนั้น
+function stockCardHtml(c, blank, period = null) {
   const box = (l, v, wd = '25%') => `<td style="${PC};width:${wd}"><span style="color:#858a92;font-size:9px">${l}</span><br><b>${v}</b></td>`;
   const whs = [...new Set((c.lots || []).filter(l => l.qty > 0).map(l => l.warehouse).filter(Boolean))].join(', ');
   const lc = c.lastCount;
-  const head = `<div style="display:flex;justify-content:space-between;align-items:flex-end;border-bottom:2px solid #1a1c20;padding-bottom:8px;margin-bottom:10px">
+  const headOf = endBal => `<div style="display:flex;justify-content:space-between;align-items:flex-end;border-bottom:2px solid #1a1c20;padding-bottom:8px;margin-bottom:10px">
       <div style="display:flex;gap:10px;align-items:center"><img src="https://i.postimg.cc/ZnZBK2JR/logo.png" crossorigin="anonymous" style="width:40px;height:40px;object-fit:contain">
         <div><div style="font-size:15px;font-weight:700">บัตรคุมสินค้า (Stock Card)</div><div style="font-size:9.5px;color:#6f604a">คลินิกเทคนิคการแพทย์ซิสเตอร์ ศูนย์ระยอง · SistersLabStock</div></div></div>
-      <div style="text-align:right;font-size:9px;color:#858a92">${blank ? 'แบบฟอร์มสำหรับบันทึกด้วยมือ' : `พิมพ์จากระบบ ${new Date().toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' })}`}<br>แผ่นที่ ______</div></div>
+      <div style="text-align:right;font-size:9px;color:#858a92">${blank ? 'แบบฟอร์มสำหรับบันทึกด้วยมือ' : `พิมพ์จากระบบ ${new Date().toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' })}`}${period ? `<div style="font-size:11px;color:#1a1c20;font-weight:700;margin:2px 0">งวด ${esc(period.label)}</div>` : '<br>'}แผ่นที่ ______</div></div>
     <table style="width:100%;border-collapse:collapse;margin-bottom:10px"><tr>${box('ชื่อสินค้า', esc(c.name), '40%')}${box('รหัส / บาร์โค้ด', `<span style="font-family:monospace">${esc(c.barcode)}</span>`)}${box('หมวดหมู่', esc(c.category || '-'), '20%')}${box('หน่วยนับ', '__________', '15%')}</tr>
       <tr>${box('สถานที่จัดเก็บ / คลัง', esc(whs || '______________'), '40%')}${box('จุดสั่งซื้อ (ROP)', c.reorderPoint ? fmt(c.reorderPoint) : '______')}${box('สต็อกขั้นต่ำ / Safety', `${c.minStock ? fmt(c.minStock) : '____'} / ${c.safetyStock ? fmt(c.safetyStock) : '____'}`, '20%')}${box('สต็อกสูงสุด', '______', '15%')}</tr>
-      ${blank ? '' : `<tr>${box('คงเหลือปัจจุบัน (ตามระบบ)', fmt(c.total), '40%')}<td colspan="3" style="${PC};background:#faf8f4"><span style="color:#858a92;font-size:9px">ตรวจนับล่าสุด</span><br><b>${lc ? `${fmtDate(lc.date)} (${agoText(daysSince(lc.date))}) · ${esc(lc.countNo)} · โดย ${esc(lc.user)}` : 'ยังไม่เคยนับ'}</b></td></tr>`}</table>`;
+      ${blank ? '' : `<tr>${period ? box(`คงเหลือ ณ ${fmtDate(period.to)} (สิ้นงวด)`, fmt(endBal), '40%') : box('คงเหลือปัจจุบัน (ตามระบบ)', fmt(c.total), '40%')}<td colspan="3" style="${PC};background:#faf8f4"><span style="color:#858a92;font-size:9px">ตรวจนับล่าสุด</span><br><b>${lc ? `${fmtDate(lc.date)} (${agoText(daysSince(lc.date))}) · ${esc(lc.countNo)} · โดย ${esc(lc.user)}` : 'ยังไม่เคยนับ'}</b></td></tr>`}</table>`;
   const cols = ['วันที่', 'เลขที่เอกสาร', 'รายการ (รับจาก / จ่ายให้)', 'Lot', 'วันหมดอายุ', 'รับ', 'จ่าย', 'คงเหลือ', 'ผู้บันทึก'];
   const wd = ['10%', '14%', '20%', '10%', '10%', '8%', '8%', '9%', '11%'];
   const th = `<tr>${cols.map((x, i) => `<th style="${PH};width:${wd[i]};text-align:${i >= 5 && i <= 7 ? 'right' : 'left'}">${x}</th>`).join('')}</tr>`;
   const td = (v, r) => `<td style="${PC};${r ? 'text-align:right' : ''}">${v}</td>`;
   const rows = [];
+  let endBal = c.total;
   if (!blank) {
     // เรียงเก่า → ใหม่ คำนวณยอดคงเหลือรวม · ในวันเดียวกัน: รับ/จ่ายปกติ → แถวตรวจนับ → รายการปรับยอดจากการนับ
     const rank = e => e.kind === 'c' ? 1 : /^CNT-/.test(e.docNo || '') ? 2 : 0;
     const ev = [...c.moves].reverse().map((m, k) => ({ ...m, k, kind: 'm' }))
       .concat((c.counts || []).map((x, k) => ({ ...x, k, kind: 'c' })))
       .sort((a, b) => a.date.localeCompare(b.date) || rank(a) - rank(b) || a.k - b.k);
-    let bal = 0;
+    let bal = 0, opened = !period;
+    const openRow = () => { opened = true;
+      rows.push(`<tr style="background:#faf8f4">${td(fmtDate(period.from))}${td('')}<td colspan="3" style="${PC}"><b>ยอดยกมา</b> (คงเหลือก่อน ${fmtDate(period.from)})</td>${td('', 1)}${td('', 1)}${td(`<b>${fmt(bal)}</b>`, 1)}${td('')}</tr>`); };
     for (const e of ev) {
+      if (period && e.date > period.to) break;
+      const inRange = !period || e.date >= period.from;
+      if (inRange && !opened) openRow();
       if (e.kind === 'm') {
         bal = Math.round((bal + (e.type === 'IN' ? e.qty : -e.qty)) * 100) / 100;
+        if (!inRange) continue;
         const what = e.note || (e.type === 'IN' ? 'รับเข้า' : 'เบิกออก') + (e.warehouse ? ` (${e.warehouse})` : '');
         rows.push(`<tr>${td(fmtDate(e.date))}${td(`<span style="font-family:monospace;font-size:9px">${esc(e.docNo || '-')}</span>`)}${td(esc(what))}${td(esc(e.lot))}${td(fmtDate(e.exp))}
           ${td(e.type === 'IN' ? fmt(e.qty) : '', 1)}${td(e.type === 'OUT' ? fmt(e.qty) : '', 1)}${td(`<b>${fmt(bal)}</b>`, 1)}${td(esc(e.user || ''))}</tr>`);
       } else {
+        if (!inRange) continue;
         const d = Math.round((e.countedQty - e.systemQty) * 100) / 100;
         rows.push(`<tr style="background:#eef3f9">${td(fmtDate(e.date))}${td(`<span style="font-family:monospace;font-size:9px">${esc(e.countNo)}</span>`)}
           <td colspan="3" style="${PC}"><b>ตรวจนับ</b> Lot ${esc(e.lot)}: ระบบ ${fmt(e.systemQty)} / นับได้ <b>${fmt(e.countedQty)}</b> ${d === 0 ? '✓ ตรง' : `(${d > 0 ? '+' : '−'}${fmt(Math.abs(d))})`}</td>
           ${td('', 1)}${td('', 1)}${td('', 1)}${td(esc(e.user || ''))}</tr>`);
       }
     }
+    if (!opened) openRow();
+    if (period) endBal = bal;
   } else {
     rows.push(`<tr>${td('')}${td('')}${td('<b>ยอดยกมา</b>')}${td('')}${td('')}${td('', 1)}${td('', 1)}${td('', 1)}${td('')}</tr>`);
   }
@@ -2133,7 +2170,7 @@ function stockCardHtml(c, blank) {
   fill += capAt(totalRows) - totalRows;
   for (let k = 0; k < fill; k++) rows.push(blankRow);
   const pages = paginate(rows, firstCap, restCap);
-  return head + pages.map((p, n) => `${n ? '<div class="html2pdf__page-break"></div>' : ''}<table style="width:100%;border-collapse:collapse"><thead>${th}</thead><tbody>${p.join('')}</tbody></table>`).join('')
+  return headOf(endBal) + pages.map((p, n) => `${n ? '<div class="html2pdf__page-break"></div>' : ''}<table style="width:100%;border-collapse:collapse"><thead>${th}</thead><tbody>${p.join('')}</tbody></table>`).join('')
     + `<div style="display:flex;justify-content:space-between;margin-top:10px;font-size:9.5px;color:#464b53"><span>หมายเหตุ: บันทึกทุกครั้งที่รับ/จ่าย · ตรวจนับและลงชื่อทุกเดือน</span><span>ผู้ตรวจสอบ ............................ วันที่ ____/____/______</span></div>`;
 }
 
