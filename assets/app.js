@@ -2059,11 +2059,24 @@ async function askStockCards(barcode) {
       <p class="hint"><i class="bi bi-info-circle"></i> เลือกรายเดือน/ช่วงวันที่: บรรทัดแรกเป็นยอดยกมา ณ วันเริ่มต้น แล้วแสดงเฉพาะรายการในช่วงนั้น</p>
       <div class="field"><span>รูปแบบ</span>
         <label class="check"><input type="radio" name="sk-mode" value="history" checked> พร้อมประวัติรับ–จ่ายจากระบบ (+ แถวว่างไว้เขียนต่อ)</label>
-        <label class="check"><input type="radio" name="sk-mode" value="blank"> แบบฟอร์มเปล่า สำหรับเขียนมือแขวนที่ชั้นวาง</label></div></div>`,
+        <label class="check"><input type="radio" name="sk-mode" value="blank"> แบบฟอร์มเปล่า สำหรับเขียนมือแขวนที่ชั้นวาง</label></div>
+      <div class="field"><span>ผู้ตรวจสอบ (ไม่บังคับ · เว้นว่างไว้ = เว้นช่องให้เซ็นด้วยมือ)</span>
+        <div style="display:flex;gap:8px"><input class="input" id="sk-signer" placeholder="ชื่อผู้ตรวจสอบ" style="flex:1"><input class="input" type="date" id="sk-sdate" value="${isoDate()}" style="width:150px"></div>
+        <canvas id="sk-sig" width="600" height="170" style="width:100%;height:110px;margin-top:6px;border:1px dashed #b9ae9b;border-radius:8px;background:#fff;touch-action:none;cursor:crosshair"></canvas>
+        <div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;color:#858a92"><span>เซ็นชื่อในกรอบด้านบน (นิ้ว / เมาส์ / ปากกา)</span><button type="button" class="btn btn-ghost btn-sm" id="sk-sig-clear">ล้างลายเซ็น</button></div></div></div>`,
     showCancelButton: true, confirmButtonText: '<i class="bi bi-printer"></i> สร้าง PDF', cancelButtonText: 'ยกเลิก', focusConfirm: false,
     didOpen: () => {
       const sync = () => { const v = $('#sk-period').value; $('#sk-month-wrap').classList.toggle('hidden', v !== 'month'); $('#sk-range-wrap').classList.toggle('hidden', v !== 'range'); };
       $('#sk-period').addEventListener('change', sync); sync();
+      // ช่องเซ็นชื่อ
+      const cv = $('#sk-sig'), cx = cv.getContext('2d'); let drawing = false;
+      cx.lineWidth = 2.6; cx.lineCap = 'round'; cx.lineJoin = 'round'; cx.strokeStyle = '#1a2b6d';
+      const pt = e => { const b = cv.getBoundingClientRect(); return [(e.clientX - b.left) * cv.width / b.width, (e.clientY - b.top) * cv.height / b.height]; };
+      cv.addEventListener('pointerdown', e => { drawing = true; cv.setPointerCapture(e.pointerId); const [x, y] = pt(e); cx.beginPath(); cx.moveTo(x, y); cx.lineTo(x + 0.1, y); cx.stroke(); cv.dataset.signed = '1'; });
+      cv.addEventListener('pointermove', e => { if (!drawing) return; const [x, y] = pt(e); cx.lineTo(x, y); cx.stroke(); });
+      const stop = () => { drawing = false; };
+      cv.addEventListener('pointerup', stop); cv.addEventListener('pointercancel', stop);
+      $('#sk-sig-clear').addEventListener('click', () => { cx.clearRect(0, 0, cv.width, cv.height); cv.dataset.signed = ''; });
     },
     preConfirm: () => {
       const v = $('#sk-period').value;
@@ -2079,11 +2092,13 @@ async function askStockCards(barcode) {
         if (from > to) return Swal.showValidationMessage('วันที่เริ่มต้นต้องไม่หลังวันที่สิ้นสุด');
         period = { from, to, label: `${fmtDate(from)} – ${fmtDate(to)}`, tag: `${from}_${to}` };
       }
-      return { sel: $('#sk-prod').value, mode: ($('input[name="sk-mode"]:checked') || {}).value || 'history', period };
+      const cv = $('#sk-sig');
+      const sign = { img: cv.dataset.signed ? cv.toDataURL('image/png') : '', name: $('#sk-signer').value.trim(), date: $('#sk-sdate').value };
+      return { sel: $('#sk-prod').value, mode: ($('input[name="sk-mode"]:checked') || {}).value || 'history', period, sign };
     },
   });
   if (!r.isConfirmed) return;
-  const { sel, mode, period } = r.value;
+  const { sel, mode, period, sign } = r.value;
   let list = sel === '__all' ? prods.map(p => p.barcode) : sel === '__stock' ? [...new Set(S.inventory.map(i => i.barcode))] : [sel];
   list = list.filter(Boolean);
   if (!list.length) return Swal.fire({ icon: 'info', title: 'ไม่มีสินค้าให้พิมพ์' });
@@ -2108,19 +2123,20 @@ async function askStockCards(barcode) {
     if (!cards.length) return Swal.fire({ icon: 'info', title: 'สินค้าที่เลือกยังไม่มีการเคลื่อนไหว', text: 'ลองเลือกแบบฟอร์มเปล่า' });
   }
   cards.sort((a, b) => a.name.localeCompare(b.name, 'th'));
-  const html = cards.map((c, n) => (n ? '<div class="html2pdf__page-break"></div>' : '') + stockCardHtml(c, mode === 'blank', period)).join('');
+  const html = cards.map((c, n) => (n ? '<div class="html2pdf__page-break"></div>' : '') + stockCardHtml(c, mode === 'blank', period, sign)).join('');
   const tag = period ? `_${period.tag}` : '';
   renderPdf(html, cards.length === 1 ? `StockCard_${cards[0].barcode}${tag}` : `StockCard_${cards.length}รายการ${tag}`, 'portrait');
 }
 // period = null (ทั้งหมด) หรือ { from, to, label } — แสดงยอดยกมา ณ วันเริ่มต้น แล้วเฉพาะรายการในช่วงนั้น
-function stockCardHtml(c, blank, period = null) {
+// sign = { img (dataURL ลายเซ็น), name, date } — ถ้าไม่มี จะเว้นช่องให้เซ็นด้วยมือ
+function stockCardHtml(c, blank, period = null, sign = null) {
   const box = (l, v, wd = '25%') => `<td style="${PC};width:${wd}"><span style="color:#858a92;font-size:9px">${l}</span><br><b>${v}</b></td>`;
   const whs = [...new Set((c.lots || []).filter(l => l.qty > 0).map(l => l.warehouse).filter(Boolean))].join(', ');
   const lc = c.lastCount;
-  const headOf = endBal => `<div style="display:flex;justify-content:space-between;align-items:flex-end;border-bottom:2px solid #1a1c20;padding-bottom:8px;margin-bottom:10px">
-      <div style="display:flex;gap:10px;align-items:center"><img src="https://i.postimg.cc/ZnZBK2JR/logo.png" crossorigin="anonymous" style="width:40px;height:40px;object-fit:contain">
+  const headOf = (endBal, pg, pgs) => `<div style="display:flex;justify-content:space-between;align-items:flex-end;border-bottom:2px solid #1a1c20;padding-bottom:8px;margin-bottom:10px">
+      <div style="display:flex;gap:10px;align-items:center"><img src="${PDF_LOGO}" crossorigin="anonymous" style="width:40px;height:40px;object-fit:contain">
         <div><div style="font-size:15px;font-weight:700">บัตรคุมสินค้า (Stock Card)</div><div style="font-size:9.5px;color:#6f604a">คลินิกเทคนิคการแพทย์ซิสเตอร์ ศูนย์ระยอง · SistersLabStock</div></div></div>
-      <div style="text-align:right;font-size:9px;color:#858a92">${blank ? 'แบบฟอร์มสำหรับบันทึกด้วยมือ' : `พิมพ์จากระบบ ${new Date().toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' })}`}${period ? `<div style="font-size:11px;color:#1a1c20;font-weight:700;margin:2px 0">งวด ${esc(period.label)}</div>` : '<br>'}แผ่นที่ ______</div></div>
+      <div style="text-align:right;font-size:9px;color:#858a92">${blank ? 'แบบฟอร์มสำหรับบันทึกด้วยมือ' : `พิมพ์จากระบบ ${new Date().toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' })}`}${period ? `<div style="font-size:11px;color:#1a1c20;font-weight:700;margin:2px 0">งวด ${esc(period.label)}</div>` : '<br>'}แผ่นที่ <b style="color:#1a1c20">${pg} / ${pgs}</b></div></div>
     <table style="width:100%;border-collapse:collapse;margin-bottom:10px"><tr>${box('ชื่อสินค้า', esc(c.name), '40%')}${box('รหัส / บาร์โค้ด', `<span style="font-family:monospace">${esc(c.barcode)}</span>`)}${box('หมวดหมู่', esc(c.category || '-'), '20%')}${box('หน่วยนับ', '__________', '15%')}</tr>
       <tr>${box('สถานที่จัดเก็บ / คลัง', esc(whs || '______________'), '40%')}${box('จุดสั่งซื้อ (ROP)', c.reorderPoint ? fmt(c.reorderPoint) : '______')}${box('สต็อกขั้นต่ำ / Safety', `${c.minStock ? fmt(c.minStock) : '____'} / ${c.safetyStock ? fmt(c.safetyStock) : '____'}`, '20%')}${box('สต็อกสูงสุด', '______', '15%')}</tr>
       ${blank ? '' : `<tr>${period ? box(`คงเหลือ ณ ${fmtDate(period.to)} (สิ้นงวด)`, fmt(endBal), '40%') : box('คงเหลือปัจจุบัน (ตามระบบ)', fmt(c.total), '40%')}<td colspan="3" style="${PC};background:#faf8f4"><span style="color:#858a92;font-size:9px">ตรวจนับล่าสุด</span><br><b>${lc ? `${fmtDate(lc.date)} (${agoText(daysSince(lc.date))}) · ${esc(lc.countNo)} · โดย ${esc(lc.user)}` : 'ยังไม่เคยนับ'}</b></td></tr>`}</table>`;
@@ -2162,19 +2178,28 @@ function stockCardHtml(c, blank, period = null) {
   } else {
     rows.push(`<tr>${td('')}${td('')}${td('<b>ยอดยกมา</b>')}${td('')}${td('')}${td('', 1)}${td('', 1)}${td('', 1)}${td('')}</tr>`);
   }
-  const blankRow = `<tr>${cols.map(() => `<td style="${PC};height:21px"></td>`).join('')}</tr>`;
-  const firstCap = blank ? 26 : 22, restCap = 32;
+  // ทุกหน้า = หัวบัตรเต็ม + ตาราง + ช่องลงชื่อผู้ตรวจสอบ · หน้าละสูง 1,025px (html2pdf จัดหน้า A4 ที่กว้าง 726px → พื้นที่พิมพ์สูง 1,045px)
+  // หัว+ท้าย ≈ 339px (มีประวัติ) / 289px (ฟอร์มเปล่า) · แถวละ ~26px → 25 / 27 แถวต่อหน้า แล้วตารางยืดเต็มพื้นที่ที่เหลือ
   // เติมแถวว่างให้เต็มหน้าสุดท้าย (อย่างน้อย 6 แถวสำหรับเขียนต่อ)
-  let fill = 6; const totalRows = rows.length + fill;
-  const capAt = n => n <= firstCap ? firstCap : firstCap + Math.ceil((n - firstCap) / restCap) * restCap;
-  fill += capAt(totalRows) - totalRows;
-  for (let k = 0; k < fill; k++) rows.push(blankRow);
-  const pages = paginate(rows, firstCap, restCap);
-  return headOf(endBal) + pages.map((p, n) => `${n ? '<div class="html2pdf__page-break"></div>' : ''}<table style="width:100%;border-collapse:collapse"><thead>${th}</thead><tbody>${p.join('')}</tbody></table>`).join('')
-    + `<div style="display:flex;justify-content:space-between;margin-top:10px;font-size:9.5px;color:#464b53"><span>หมายเหตุ: บันทึกทุกครั้งที่รับ/จ่าย · ตรวจนับและลงชื่อทุกเดือน</span><span>ผู้ตรวจสอบ ............................ วันที่ ____/____/______</span></div>`;
+  const cap = blank ? 27 : 25;
+  const blankRow = `<tr>${cols.map(() => `<td style="${PC}">&nbsp;</td>`).join('')}</tr>`;
+  const pgs = Math.ceil((rows.length + 6) / cap);
+  while (rows.length < pgs * cap) rows.push(blankRow);
+  const signed = sign && (sign.img || sign.name);
+  const foot = `<div style="display:flex;justify-content:space-between;align-items:flex-end;margin-top:8px;font-size:9.5px;color:#464b53">
+      <div style="padding-bottom:2px">หมายเหตุ: บันทึกทุกครั้งที่รับ/จ่าย · ตรวจนับและลงชื่อทุกเดือน</div>
+      <div style="text-align:center;width:230px">
+        <div style="height:46px;display:flex;align-items:flex-end;justify-content:center">${sign && sign.img ? `<img src="${sign.img}" style="max-height:46px;max-width:210px">` : ''}</div>
+        <div style="border-top:1px dotted #464b53;padding-top:3px">ลงชื่อ ผู้ตรวจสอบ</div>
+        <div style="margin-top:2px;color:#1a1c20">(${signed && sign.name ? esc(sign.name) : '&nbsp;'.repeat(50)})</div>
+        <div style="color:#858a92;margin-top:2px">วันที่ ${signed && sign.date ? fmtDate(sign.date) : '____/____/______'}</div></div></div>`;
+  return paginate(rows, cap, cap).map((p, n) => `${n ? '<div class="html2pdf__page-break"></div>' : ''}<div style="height:1025px;display:flex;flex-direction:column">
+    ${headOf(endBal, n + 1, pgs)}<div style="flex:1;min-height:0"><table style="width:100%;height:100%;border-collapse:collapse"><thead>${th}</thead><tbody>${p.join('')}</tbody></table></div>${foot}</div>`).join('');
 }
 
 // ---------------------------------------------------------------- PDF
+// โลโก้ใน PDF: ใช้ URL แยก (?cors=1) เพื่อไม่ให้ไปเจอรูปที่ Service Worker แคชไว้แบบ no-cors (ทำให้โลโก้หายใน PDF)
+const PDF_LOGO = 'https://i.postimg.cc/ZnZBK2JR/logo.png?cors=1';
 const PDF_STATUS = { 'Normal': ['#e7efe9', '#4a7a62'], 'Warning': ['#f5eedb', '#9a7319'], 'Near Expiry': ['#f6e7dc', '#b05f2a'], 'Critical': ['#f5e2df', '#a53c33'], 'Expired': ['#1a1c20', '#ffffff'] };
 const pdfBadge = s => `<span style="background:${PDF_STATUS[s][0]};color:${PDF_STATUS[s][1]};padding:2px 8px;border-radius:10px;font-size:9px;font-weight:600;white-space:nowrap">${STATUS[s].th}</span>`;
 const pdfCountdown = (d, s) => d === null || d === undefined || d > 90000 ? ''
@@ -2182,7 +2207,7 @@ const pdfCountdown = (d, s) => d === null || d === undefined || d > 90000 ? ''
 function pdfHeader(title, subtitle) {
   const now = new Date();
   return `<div style="display:flex;justify-content:space-between;align-items:flex-end;border-bottom:2px solid #1a1c20;padding-bottom:12px;margin-bottom:14px">
-    <div style="display:flex;gap:12px;align-items:center"><img src="https://i.postimg.cc/ZnZBK2JR/logo.png" crossorigin="anonymous" style="width:52px;height:52px;object-fit:contain">
+    <div style="display:flex;gap:12px;align-items:center"><img src="${PDF_LOGO}" crossorigin="anonymous" style="width:52px;height:52px;object-fit:contain">
       <div><div style="font-size:20px;font-weight:700;color:#1a1c20">SistersLabStock</div><div style="font-size:10px;color:#6f604a">คลินิกเทคนิคการแพทย์ซิสเตอร์ ศูนย์ระยอง</div></div></div>
     <div style="text-align:right"><div style="font-size:17px;font-weight:700;color:#2b5486">${esc(title)}</div><div style="font-size:11px;color:#464b53">${esc(subtitle || '')}</div>
       <div style="font-size:10px;color:#858a92">พิมพ์ ${now.toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' })} ${now.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })} น. · โดย ${esc(S.session.displayName || S.session.username)}</div></div></div>`;
@@ -2192,16 +2217,19 @@ async function renderPdf(html, file, orientation) {
   root.style.width = orientation === 'portrait' ? '760px' : '1100px';
   root.innerHTML = `<div style="font-family:'IBM Plex Sans Thai',sans-serif;color:#1a1c20;padding:8px;background:#fff">${html}</div>`;
   loading('กำลังสร้าง PDF...');
+  // html2canvas เลื่อนภาพตามตำแหน่งที่เลื่อนหน้าจออยู่ (ทำให้หัวกระดาษตกลงมาเว้นที่ว่างด้านบน) → เลื่อนขึ้นบนสุดก่อน แล้วค่อยคืนตำแหน่งเดิม
+  const sx = window.scrollX, sy = window.scrollY;
+  window.scrollTo(0, 0);
   try {
     await html2pdf().set({ margin: [0.35, 0.35, 0.45, 0.35], filename: file + '.pdf', image: { type: 'jpeg', quality: 0.96 },
-      html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff' }, jsPDF: { unit: 'in', format: 'a4', orientation }, pagebreak: { mode: ['css', 'legacy'], avoid: 'tr' } })
+      html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff', scrollX: 0, scrollY: 0 }, jsPDF: { unit: 'in', format: 'a4', orientation }, pagebreak: { mode: ['css', 'legacy'], avoid: 'tr' } })
       .from(root.firstChild).toPdf().get('pdf').then(pdf => {
         const n = pdf.internal.getNumberOfPages(), w = pdf.internal.pageSize.getWidth(), h = pdf.internal.pageSize.getHeight();
         for (let i = 1; i <= n; i++) { pdf.setPage(i); pdf.setFontSize(8); pdf.setTextColor(140); pdf.text(`Page ${i} / ${n}`, w - 0.35, h - 0.2, { align: 'right' }); }
       }).save();
     Swal.close();
   } catch (e) { fail(e); }
-  finally { root.innerHTML = ''; }
+  finally { root.innerHTML = ''; window.scrollTo(sx, sy); }
 }
 function printReport({ title, subtitle, file, kpis = [], cols, rows, align = {}, widths = {}, orientation = 'landscape' }) {
   const per = orientation === 'landscape' ? [16, 22] : [26, 32];
