@@ -29,7 +29,11 @@ const STATUS = {
   'Expired': { th: 'หมดอายุ', cls: 'st-Expired', color: 'var(--exp)', desc: 'เลยวันหมดอายุ' },
 };
 const STATUS_KEYS = Object.keys(STATUS);
-const badge = s => `<span class="badge ${STATUS[s] ? STATUS[s].cls : ''}">${esc(STATUS[s] ? STATUS[s].th : s)}</span>`;
+// สถานะพิเศษของ Lot ที่ของหมดแล้ว (คงเหลือ 0) ใช้ในหน้าสินค้าคงคลัง
+const DEPLETED = 'Depleted', DEPLETED_TH = 'หมดสต็อก';
+const stTh = s => s === DEPLETED ? DEPLETED_TH : STATUS[s] ? STATUS[s].th : s;
+const badge = s => s === DEPLETED ? `<span class="badge" style="background:var(--surface-2);color:var(--muted);border:1px solid var(--line)">${DEPLETED_TH}</span>`
+  : `<span class="badge ${STATUS[s] ? STATUS[s].cls : ''}">${esc(STATUS[s] ? STATUS[s].th : s)}</span>`;
 const typeBadge = t => `<span class="badge plain t-${t}">${t === 'IN' ? '<i class="bi bi-arrow-down"></i> รับเข้า' : '<i class="bi bi-arrow-up"></i> เบิกออก'}</span>`;
 const daysText = d => d === null || d === undefined || d > 90000 ? '-' : d < 0 ? `<span class="days-neg">เลย ${fmt(-d)} วัน</span>` : `${fmt(d)} วัน`;
 // ป้ายนับถอยหลังวันหมดอายุ เช่น "อีก 170 วัน" / "หมดวันนี้" / "เลย 5 วัน" (สีตามสถานะ)
@@ -93,6 +97,7 @@ async function loadAll(silent = true) {
     ]);
     S.inventory = dash.inventory; S.trends = dash.trends; S.txs = dash.rawTransactions; S.stats = dash.stats;
     S.reorderPoints = dash.reorderPoints || [];
+    S.depleted = dash.depleted || []; // Lot ที่ของหมดแล้ว (คงเหลือ 0) — แสดงเฉพาะหน้าสินค้าคงคลัง
     S.warehouses = lookups.warehouses; S.categories = lookups.categories; S.products = products; S.docs = docs;
     S.lastLoad = Date.now(); S.loaded = true;
     updateBadges();
@@ -1206,7 +1211,9 @@ function fillSelect(sel, list, allText) {
 }
 function inventoryRows() {
   const wh = $('#inv-wh').value, cat = $('#inv-cat').value, q = $('#inv-q').value.trim().toLowerCase();
-  let rows = S.inventory.filter(i => (!wh || i.warehouse === wh) && (!cat || i.category === cat)
+  // แสดงครบทุกรายการในระบบ: Lot ที่มีของ + Lot ที่ของหมดแล้ว (คงเหลือ 0 · สถานะ "หมดสต็อก")
+  const all = S.inventory.concat((S.depleted || []).map(i => ({ ...i, qty: 0, days: null, status: DEPLETED, zero: true })));
+  let rows = all.filter(i => (!wh || i.warehouse === wh) && (!cat || i.category === cat)
     && (!q || [i.name, i.barcode, i.lot].join(' ').toLowerCase().includes(q)));
   const base = rows;
   if (INV.status) rows = rows.filter(i => i.status === INV.status);
@@ -1215,13 +1222,16 @@ function inventoryRows() {
     for (const i of rows) {
       let p = map.get(i.barcode);
       if (!p) { p = { barcode: i.barcode, name: i.name, category: i.category, qty: 0, lots: 0, wh: new Set(), exp: null, days: null, status: 'Normal', reorderPoint: i.reorderPoint }; map.set(i.barcode, p); }
+      if (i.zero) continue; // Lot ที่หมดแล้ว ไม่นับจำนวน Lot / วันหมดอายุ
       p.qty += i.qty; p.lots++; p.wh.add(i.warehouse);
       if (i.exp && (p.days === null || i.days < p.days)) { p.days = i.days; p.exp = i.exp; p.status = i.status; }
     }
-    rows = [...map.values()].map(p => ({ ...p, qty: Math.round(p.qty * 100) / 100, warehouse: [...p.wh].join(', ') }));
+    rows = [...map.values()].map(p => ({ ...p, qty: Math.round(p.qty * 100) / 100, warehouse: [...p.wh].join(', ') || '-', ...(p.lots ? {} : { status: DEPLETED, zero: true }) }));
   }
   const { key, asc } = INV.sort, dir = asc ? 1 : -1;
-  rows.sort((a, b) => key === 'name' ? dir * a.name.localeCompare(b.name, 'th') : key === 'qty' ? dir * (a.qty - b.qty) : dir * ((a.days ?? 1e9) - (b.days ?? 1e9)));
+  // เรียงตามวันหมดอายุ: รายการที่หมดสต็อกไว้ท้ายสุดเสมอ
+  rows.sort((a, b) => key === 'name' ? dir * a.name.localeCompare(b.name, 'th') : key === 'qty' ? dir * (a.qty - b.qty)
+    : (!!a.zero - !!b.zero) || dir * ((a.days ?? 1e9) - (b.days ?? 1e9)));
   return { rows, base };
 }
 function renderInventory({ params, changed }) {
@@ -1232,16 +1242,18 @@ function renderInventory({ params, changed }) {
   const { rows, base } = inventoryRows();
   const counts = Object.fromEntries(STATUS_KEYS.map(k => [k, base.filter(i => i.status === k).length]));
   $('#inv-status-chips').innerHTML = `<button class="chip ${!INV.status ? 'active' : ''}" data-s="">ทั้งหมด <b>${base.length}</b></button>` +
-    STATUS_KEYS.map(k => `<button class="chip ${INV.status === k ? 'active' : ''}" data-s="${k}"><span class="lg-dot" style="width:8px;height:8px;border-radius:50%;background:${STATUS[k].color}"></span>${STATUS[k].th} <b>${counts[k]}</b></button>`).join('');
+    STATUS_KEYS.map(k => `<button class="chip ${INV.status === k ? 'active' : ''}" data-s="${k}"><span class="lg-dot" style="width:8px;height:8px;border-radius:50%;background:${STATUS[k].color}"></span>${STATUS[k].th} <b>${counts[k]}</b></button>`).join('')
+    + `<button class="chip ${INV.status === DEPLETED ? 'active' : ''}" data-s="${DEPLETED}"><span class="lg-dot" style="width:8px;height:8px;border-radius:50%;background:var(--muted)"></span>${DEPLETED_TH} <b>${base.filter(i => i.zero).length}</b></button>`;
   $$('#inv-status-chips .chip').forEach(c => c.onclick = () => { INV.status = c.dataset.s; renderInventory({ params: new URLSearchParams() }); });
   const totalQty = rows.reduce((s, r) => s + r.qty, 0);
-  $('#inv-summary').textContent = `${rows.length} ${INV.view === 'lot' ? 'Lot' : 'รายการสินค้า'} · รวม ${fmt(totalQty)} ชิ้น`;
+  const zeroN = rows.filter(r => r.zero).length;
+  $('#inv-summary').textContent = `${rows.length} ${INV.view === 'lot' ? 'Lot' : 'รายการสินค้า'}${zeroN ? ` (มีของ ${rows.length - zeroN} · หมดสต็อก ${zeroN})` : ''} · รวม ${fmt(totalQty)} ชิ้น`;
   const sortTh = (k, label, cls = '') => `<th class="sortable ${cls} ${INV.sort.key === k ? 'sorted' : ''}" data-sort="${k}">${label}<i class="bi bi-${INV.sort.key === k ? (INV.sort.asc ? 'sort-down-alt' : 'sort-down') : 'arrow-down-up'}"></i></th>`;
   const admin = can('Admin');
   if (!rows.length) { $('#inv-table').innerHTML = empty(S.loaded ? 'ไม่พบสินค้าตามเงื่อนไข' : 'กำลังโหลด...', 'search'); return; }
   if (INV.view === 'lot') {
     $('#inv-table').innerHTML = `<div class="table-wrap"><table class="tbl"><thead><tr>${sortTh('name', 'สินค้า')}<th>Lot</th>${sortTh('days', 'วันหมดอายุ')}<th>คลัง</th><th>สถานะ</th>${sortTh('qty', 'คงเหลือ', 'num')}${admin ? '<th></th>' : ''}</tr></thead><tbody>
-      ${rows.map((i, n) => `<tr class="clickable" data-bc="${esc(i.barcode)}"><td class="prod-cell"><strong>${esc(i.name)}</strong><small class="mono">${esc(i.barcode)} · ${esc(i.category || '-')}</small></td>
+      ${rows.map((i, n) => `<tr class="clickable" data-bc="${esc(i.barcode)}"${i.zero ? ' style="opacity:.6"' : ''}><td class="prod-cell"><strong>${esc(i.name)}</strong><small class="mono">${esc(i.barcode)} · ${esc(i.category || '-')}</small></td>
         <td class="mono">${esc(i.lot)}</td>
         <td class="nowrap">${fmtDate(i.exp)}<div class="small muted">${daysText(i.days)}</div></td><td><span class="tag-wh">${esc(i.warehouse || '-')}</span></td>
         <td>${badge(i.status)}${i.managedType ? `<div class="small muted"><i class="bi bi-check2"></i> ${esc(i.managedType)}</div>` : ''}</td>
@@ -1250,7 +1262,7 @@ function renderInventory({ params, changed }) {
       </tbody></table></div>`;
   } else {
     $('#inv-table').innerHTML = `<div class="table-wrap"><table class="tbl"><thead><tr>${sortTh('name', 'สินค้า')}<th>หมวดหมู่</th><th>คลัง</th><th class="num">จำนวน Lot</th>${sortTh('days', 'หมดอายุเร็วสุด')}${sortTh('qty', 'คงเหลือรวม', 'num')}<th class="num">จุดสั่งซื้อ</th></tr></thead><tbody>
-      ${rows.map(p => `<tr class="clickable" data-bc="${esc(p.barcode)}"><td class="prod-cell"><strong>${esc(p.name)}</strong><small class="mono">${esc(p.barcode)}</small></td>
+      ${rows.map(p => `<tr class="clickable" data-bc="${esc(p.barcode)}"${p.zero ? ' style="opacity:.6"' : ''}><td class="prod-cell"><strong>${esc(p.name)}</strong><small class="mono">${esc(p.barcode)}</small></td>
         <td>${esc(p.category || '-')}</td><td class="small">${esc(p.warehouse)}</td><td class="num">${p.lots}</td>
         <td class="nowrap">${fmtDate(p.exp)} ${badge(p.status)}<div class="small muted">${daysText(p.days)}</div></td>
         <td class="num qty-strong" ${p.reorderPoint && p.qty <= p.reorderPoint ? 'style="color:var(--crit)"' : ''}>${fmt(p.qty)}</td>
@@ -1313,7 +1325,7 @@ async function deleteInventoryItem(item) {
 $('#inv-excel').addEventListener('click', () => {
   const { rows } = inventoryRows();
   const data = INV.view === 'lot'
-    ? rows.map(i => ({ 'บาร์โค้ด': i.barcode, 'ชื่อสินค้า': i.name, 'Lot': i.lot, 'วันหมดอายุ': i.exp, 'เหลือ (วัน)': i.days, 'สถานะ': STATUS[i.status].th, 'หมวดหมู่': i.category, 'คลัง': i.warehouse, 'คงเหลือ': i.qty }))
+    ? rows.map(i => ({ 'บาร์โค้ด': i.barcode, 'ชื่อสินค้า': i.name, 'Lot': i.lot, 'วันหมดอายุ': i.exp, 'เหลือ (วัน)': i.days, 'สถานะ': stTh(i.status), 'หมวดหมู่': i.category, 'คลัง': i.warehouse, 'คงเหลือ': i.qty }))
     : rows.map(p => ({ 'บาร์โค้ด': p.barcode, 'ชื่อสินค้า': p.name, 'หมวดหมู่': p.category, 'คลัง': p.warehouse, 'จำนวน Lot': p.lots, 'หมดอายุเร็วสุด': p.exp, 'คงเหลือรวม': p.qty, 'จุดสั่งซื้อ': p.reorderPoint || '' }));
   const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(data), 'สินค้าคงคลัง');
   XLSX.writeFile(wb, `สินค้าคงคลัง_${isoDate()}.xlsx`);
@@ -1323,7 +1335,7 @@ $('#inv-pdf').addEventListener('click', () => {
   const filters = [$('#inv-wh').value && `คลัง: ${$('#inv-wh').value}`, $('#inv-cat').value && `หมวด: ${$('#inv-cat').value}`, INV.status && `สถานะ: ${STATUS[INV.status].th}`, $('#inv-q').value && `ค้นหา: "${$('#inv-q').value}"`].filter(Boolean);
   if (INV.view === 'lot') {
     printReport({ title: 'รายงานสินค้าคงคลัง', subtitle: filters.join(' · ') || 'สินค้าทั้งหมด', file: 'Inventory_Report',
-      kpis: [['จำนวน Lot', rows.length], ['รวมคงเหลือ', fmt(rows.reduce((s, r) => s + r.qty, 0)) + ' ชิ้น'], ['ใกล้หมดอายุ ≤ 90 วัน', rows.filter(r => r.days <= 90 && r.days >= 0).length], ['หมดอายุแล้ว', rows.filter(r => r.days < 0).length]],
+      kpis: [['จำนวน Lot', rows.length], ['รวมคงเหลือ', fmt(rows.reduce((s, r) => s + r.qty, 0)) + ' ชิ้น'], ['ใกล้หมดอายุ ≤ 90 วัน', rows.filter(r => !r.zero && r.days !== null && r.days <= 90 && r.days >= 0).length], ['หมดอายุแล้ว', rows.filter(r => r.days < 0).length]],
       cols: ['#', 'บาร์โค้ด', 'ชื่อสินค้า', 'Lot', 'วันหมดอายุ', 'เหลือ', 'สถานะ', 'หมวด', 'คลัง', 'คงเหลือ'],
       rows: rows.map((i, n) => [n + 1, i.barcode, `<b>${esc(i.name)}</b>`, esc(i.lot), fmtDate(i.exp), daysText(i.days), pdfBadge(i.status), esc(i.category), esc(i.warehouse), `<b>${fmt(i.qty)}</b>`]),
       align: { 0: 'c', 5: 'r', 9: 'r' } });
@@ -2206,8 +2218,8 @@ function stockCardHtml(c, blank, period = null, sign = null) {
 // ---------------------------------------------------------------- PDF
 // โลโก้ใน PDF: ใช้ URL แยก (?cors=1) เพื่อไม่ให้ไปเจอรูปที่ Service Worker แคชไว้แบบ no-cors (ทำให้โลโก้หายใน PDF)
 const PDF_LOGO = 'https://i.postimg.cc/ZnZBK2JR/logo.png?cors=1';
-const PDF_STATUS = { 'Normal': ['#e7efe9', '#4a7a62'], 'Warning': ['#f5eedb', '#9a7319'], 'Near Expiry': ['#f6e7dc', '#b05f2a'], 'Critical': ['#f5e2df', '#a53c33'], 'Expired': ['#1a1c20', '#ffffff'] };
-const pdfBadge = s => `<span style="background:${PDF_STATUS[s][0]};color:${PDF_STATUS[s][1]};padding:2px 8px;border-radius:10px;font-size:9px;font-weight:600;white-space:nowrap">${STATUS[s].th}</span>`;
+const PDF_STATUS = { 'Normal': ['#e7efe9', '#4a7a62'], 'Warning': ['#f5eedb', '#9a7319'], 'Near Expiry': ['#f6e7dc', '#b05f2a'], 'Critical': ['#f5e2df', '#a53c33'], 'Expired': ['#1a1c20', '#ffffff'], [DEPLETED]: ['#eeeeee', '#858a92'] };
+const pdfBadge = s => `<span style="background:${PDF_STATUS[s][0]};color:${PDF_STATUS[s][1]};padding:2px 8px;border-radius:10px;font-size:9px;font-weight:600;white-space:nowrap">${stTh(s)}</span>`;
 const pdfCountdown = (d, s) => d === null || d === undefined || d > 90000 ? ''
   : `<span style="display:inline-block;margin-top:2px;border:1px solid ${s === 'Expired' ? '#a53c33' : PDF_STATUS[s][1]};color:${s === 'Expired' ? '#a53c33' : PDF_STATUS[s][1]};padding:0 6px;border-radius:10px;font-size:8.5px;font-weight:600;white-space:nowrap">${cdText(d)}</span>`;
 function pdfHeader(title, subtitle) {
