@@ -2152,16 +2152,20 @@ function stockCardHtml(c, blank, period = null, sign = null) {
     const ev = [...c.moves].reverse().map((m, k) => ({ ...m, k, kind: 'm' }))
       .concat((c.counts || []).map((x, k) => ({ ...x, k, kind: 'c' })))
       .sort((a, b) => a.date.localeCompare(b.date) || rank(a) - rank(b) || a.k - b.k);
-    let bal = 0, opened = !period;
+    let bal = 0, opened = !period, prev = null; // prev = รายการรับ/จ่ายล่าสุดก่อนเริ่มงวด
+    // ยอดยกมา = คงเหลือล่าสุด ณ รายการสุดท้ายก่อนวันเริ่มงวด (แสดงวันที่/เลขที่เอกสาร/รายละเอียดของรายการนั้น)
     const openRow = () => { opened = true;
-      rows.push(`<tr style="background:#faf8f4">${td(fmtDate(period.from))}${td('')}<td colspan="3" style="${PC}"><b>ยอดยกมา</b> (คงเหลือก่อน ${fmtDate(period.from)})</td>${td('', 1)}${td('', 1)}${td(`<b>${fmt(bal)}</b>`, 1)}${td('')}</tr>`); };
+      const how = prev ? `${prev.type === 'IN' ? 'รับเข้า' : 'เบิกออก'} ${fmt(prev.qty)}${prev.lot ? ` · Lot ${esc(prev.lot)}` : ''}` : '';
+      rows.push(`<tr style="background:#faf8f4">${td(fmtDate(prev ? prev.date : period.from))}${td(prev ? `<span style="font-family:monospace;font-size:9px">${esc(prev.docNo || '-')}</span>` : '')}`
+        + `<td colspan="3" style="${PC}"><b>ยอดยกมา</b> · ${prev ? `คงเหลือล่าสุด ณ ${fmtDate(prev.date)} <span style="color:#858a92">(รายการล่าสุด: ${how})</span>` : `ไม่มีรายการก่อน ${fmtDate(period.from)}`}</td>`
+        + `${td('', 1)}${td('', 1)}${td(`<b>${fmt(bal)}</b>`, 1)}${td(prev ? esc(prev.user || '') : '')}</tr>`); };
     for (const e of ev) {
       if (period && e.date > period.to) break;
       const inRange = !period || e.date >= period.from;
       if (inRange && !opened) openRow();
       if (e.kind === 'm') {
         bal = Math.round((bal + (e.type === 'IN' ? e.qty : -e.qty)) * 100) / 100;
-        if (!inRange) continue;
+        if (!inRange) { prev = e; continue; }
         const what = e.note || (e.type === 'IN' ? 'รับเข้า' : 'เบิกออก') + (e.warehouse ? ` (${e.warehouse})` : '');
         rows.push(`<tr>${td(fmtDate(e.date))}${td(`<span style="font-family:monospace;font-size:9px">${esc(e.docNo || '-')}</span>`)}${td(esc(what))}${td(esc(e.lot))}${td(fmtDate(e.exp))}
           ${td(e.type === 'IN' ? fmt(e.qty) : '', 1)}${td(e.type === 'OUT' ? fmt(e.qty) : '', 1)}${td(`<b>${fmt(bal)}</b>`, 1)}${td(esc(e.user || ''))}</tr>`);
