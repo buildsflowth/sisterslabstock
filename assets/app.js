@@ -2125,8 +2125,10 @@ async function askStockCards(barcode) {
   cards.sort((a, b) => a.name.localeCompare(b.name, 'th'));
   const html = cards.map((c, n) => (n ? '<div class="html2pdf__page-break"></div>' : '') + stockCardHtml(c, mode === 'blank', period, sign)).join('');
   const tag = period ? `_${period.tag}` : '';
-  renderPdf(html, cards.length === 1 ? `StockCard_${cards[0].barcode}${tag}` : `StockCard_${cards.length}รายการ${tag}`, 'portrait');
+  renderPdf(html, cards.length === 1 ? `StockCard_${cards[0].barcode}${tag}` : `StockCard_${cards.length}รายการ${tag}`, 'portrait', SC_MARGIN);
 }
+// ขอบกระดาษ Stock Card (นิ้ว: บน ซ้าย ล่าง ขวา) — ขอบบนกว้างกว่ารายงานอื่น ไม่ให้หัวเอกสารชิดขอบกระดาษ
+const SC_MARGIN = [0.6, 0.35, 0.45, 0.35];
 // period = null (ทั้งหมด) หรือ { from, to, label } — แสดงยอดยกมา ณ วันเริ่มต้น แล้วเฉพาะรายการในช่วงนั้น
 // sign = { img (dataURL ลายเซ็น), name, date } — ถ้าไม่มี จะเว้นช่องให้เซ็นด้วยมือ
 function stockCardHtml(c, blank, period = null, sign = null) {
@@ -2155,9 +2157,9 @@ function stockCardHtml(c, blank, period = null, sign = null) {
     let bal = 0, opened = !period, prev = null; // prev = รายการรับ/จ่ายล่าสุดก่อนเริ่มงวด
     // ยอดยกมา = คงเหลือล่าสุด ณ รายการสุดท้ายก่อนวันเริ่มงวด (แสดงวันที่/เลขที่เอกสาร/รายละเอียดของรายการนั้น)
     const openRow = () => { opened = true;
-      const how = prev ? `${prev.type === 'IN' ? 'รับเข้า' : 'เบิกออก'} ${fmt(prev.qty)}${prev.lot ? ` · Lot ${esc(prev.lot)}` : ''}` : '';
+      const how = prev ? `${prev.type === 'IN' ? 'รับ' : 'จ่าย'} ${fmt(prev.qty)}` : '';
       rows.push(`<tr style="background:#faf8f4">${td(fmtDate(prev ? prev.date : period.from))}${td(prev ? `<span style="font-family:monospace;font-size:9px">${esc(prev.docNo || '-')}</span>` : '')}`
-        + `<td colspan="3" style="${PC}"><b>ยอดยกมา</b> · ${prev ? `คงเหลือล่าสุด ณ ${fmtDate(prev.date)} <span style="color:#858a92">(รายการล่าสุด: ${how})</span>` : `ไม่มีรายการก่อน ${fmtDate(period.from)}`}</td>`
+        + `<td colspan="3" style="${PC}"><b>ยอดยกมา</b> · ${prev ? `คงเหลือ ณ ${fmtDate(prev.date)} <span style="color:#858a92">(${how})</span>` : `ไม่มีรายการก่อน ${fmtDate(period.from)}`}</td>`
         + `${td('', 1)}${td('', 1)}${td(`<b>${fmt(bal)}</b>`, 1)}${td(prev ? esc(prev.user || '') : '')}</tr>`); };
     for (const e of ev) {
       if (period && e.date > period.to) break;
@@ -2182,10 +2184,10 @@ function stockCardHtml(c, blank, period = null, sign = null) {
   } else {
     rows.push(`<tr>${td('')}${td('')}${td('<b>ยอดยกมา</b>')}${td('')}${td('')}${td('', 1)}${td('', 1)}${td('', 1)}${td('')}</tr>`);
   }
-  // ทุกหน้า = หัวบัตรเต็ม + ตาราง + ช่องลงชื่อผู้ตรวจสอบ · หน้าละสูง 1,025px (html2pdf จัดหน้า A4 ที่กว้าง 726px → พื้นที่พิมพ์สูง 1,045px)
-  // หัว+ท้าย ≈ 339px (มีประวัติ) / 289px (ฟอร์มเปล่า) · แถวละ ~26px → 25 / 27 แถวต่อหน้า แล้วตารางยืดเต็มพื้นที่ที่เหลือ
+  // ทุกหน้า = หัวบัตรเต็ม + ตาราง 25 แถว + ช่องลงชื่อผู้ตรวจสอบ · หน้าละสูง 1,000px
+  // (html2pdf จัดหน้า A4 ที่กว้าง 726px · ขอบ SC_MARGIN → พื้นที่พิมพ์สูง ~1,020px) ตารางยืดเต็มพื้นที่ที่เหลือ
   // เติมแถวว่างให้เต็มหน้าสุดท้าย (อย่างน้อย 6 แถวสำหรับเขียนต่อ)
-  const cap = blank ? 27 : 25;
+  const cap = 25;
   const blankRow = `<tr>${cols.map(() => `<td style="${PC}">&nbsp;</td>`).join('')}</tr>`;
   const pgs = Math.ceil((rows.length + 6) / cap);
   while (rows.length < pgs * cap) rows.push(blankRow);
@@ -2193,11 +2195,11 @@ function stockCardHtml(c, blank, period = null, sign = null) {
   const foot = `<div style="display:flex;justify-content:space-between;align-items:flex-end;margin-top:8px;font-size:9.5px;color:#464b53">
       <div style="padding-bottom:2px">หมายเหตุ: บันทึกทุกครั้งที่รับ/จ่าย · ตรวจนับและลงชื่อทุกเดือน</div>
       <div style="text-align:center;width:230px">
-        <div style="height:46px;display:flex;align-items:flex-end;justify-content:center">${sign && sign.img ? `<img src="${sign.img}" style="max-height:46px;max-width:210px">` : ''}</div>
+        <div style="height:40px;display:flex;align-items:flex-end;justify-content:center">${sign && sign.img ? `<img src="${sign.img}" style="max-height:40px;max-width:210px">` : ''}</div>
         <div style="border-top:1px dotted #464b53;padding-top:3px">ลงชื่อ ผู้ตรวจสอบ</div>
         <div style="margin-top:2px;color:#1a1c20">(${signed && sign.name ? esc(sign.name) : '&nbsp;'.repeat(50)})</div>
         <div style="color:#858a92;margin-top:2px">วันที่ ${signed && sign.date ? fmtDate(sign.date) : '____/____/______'}</div></div></div>`;
-  return paginate(rows, cap, cap).map((p, n) => `${n ? '<div class="html2pdf__page-break"></div>' : ''}<div style="height:1025px;display:flex;flex-direction:column">
+  return paginate(rows, cap, cap).map((p, n) => `${n ? '<div class="html2pdf__page-break"></div>' : ''}<div style="height:1000px;display:flex;flex-direction:column">
     ${headOf(endBal, n + 1, pgs)}<div style="flex:1;min-height:0"><table style="width:100%;height:100%;border-collapse:collapse"><thead>${th}</thead><tbody>${p.join('')}</tbody></table></div>${foot}</div>`).join('');
 }
 
@@ -2216,7 +2218,7 @@ function pdfHeader(title, subtitle) {
     <div style="text-align:right"><div style="font-size:17px;font-weight:700;color:#2b5486">${esc(title)}</div><div style="font-size:11px;color:#464b53">${esc(subtitle || '')}</div>
       <div style="font-size:10px;color:#858a92">พิมพ์ ${now.toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' })} ${now.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' })} น. · โดย ${esc(S.session.displayName || S.session.username)}</div></div></div>`;
 }
-async function renderPdf(html, file, orientation) {
+async function renderPdf(html, file, orientation, margin = [0.35, 0.35, 0.45, 0.35]) {
   const root = $('#pdf-root');
   root.style.width = orientation === 'portrait' ? '760px' : '1100px';
   root.innerHTML = `<div style="font-family:'IBM Plex Sans Thai',sans-serif;color:#1a1c20;padding:8px;background:#fff">${html}</div>`;
@@ -2225,7 +2227,7 @@ async function renderPdf(html, file, orientation) {
   const sx = window.scrollX, sy = window.scrollY;
   window.scrollTo(0, 0);
   try {
-    await html2pdf().set({ margin: [0.35, 0.35, 0.45, 0.35], filename: file + '.pdf', image: { type: 'jpeg', quality: 0.96 },
+    await html2pdf().set({ margin, filename: file + '.pdf', image: { type: 'jpeg', quality: 0.96 },
       html2canvas: { scale: 2, useCORS: true, backgroundColor: '#ffffff', scrollX: 0, scrollY: 0 }, jsPDF: { unit: 'in', format: 'a4', orientation }, pagebreak: { mode: ['css', 'legacy'], avoid: 'tr' } })
       .from(root.firstChild).toPdf().get('pdf').then(pdf => {
         const n = pdf.internal.getNumberOfPages(), w = pdf.internal.pageSize.getWidth(), h = pdf.internal.pageSize.getHeight();
