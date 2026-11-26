@@ -501,6 +501,7 @@ async function openStockCard(barcode) {
     const c = await api('getStockCard', barcode);
     if (!c) { openDrawer('ไม่พบข้อมูล', '', empty('ยังไม่มีการเคลื่อนไหวของสินค้านี้')); return; }
     const active = c.lots.filter(l => l.qty > 0).sort((a, b) => String(a.exp).localeCompare(String(b.exp)));
+    const gone = c.lots.filter(l => !(l.qty > 0)).sort((a, b) => String(b.exp).localeCompare(String(a.exp))); // Lot ที่หมดแล้ว (ซ่อนไว้ กดเลือกดูได้)
     const ropState = c.reorderPoint > 0 ? (c.total <= c.reorderPoint ? `<b style="color:var(--crit)">${fmt(c.reorderPoint)}</b> <small class="muted">(ต่ำกว่าแล้ว)</small>` : `<b>${fmt(c.reorderPoint)}</b>`) : '<b class="muted">-</b>';
     openDrawer(c.name, `<span class="mono">${esc(c.barcode)}</span> · ${esc(c.category || '-')}`, `
       <div class="dl">
@@ -521,9 +522,12 @@ async function openStockCard(barcode) {
           <a class="btn btn-out btn-sm" href="#/move?mode=OUT&bc=${encodeURIComponent(c.barcode)}">เบิกออก</a>` : ''}
         </div>
       </div>
-      <div class="card p0"><div class="card-head pad"><h3>Lot คงเหลือ</h3></div>
-        <div class="table-wrap">${active.length ? `<table class="tbl"><thead><tr><th>Lot</th><th>วันหมดอายุ</th><th>คลัง</th><th>สถานะ</th><th class="num">คงเหลือ</th></tr></thead><tbody>
+      <div class="card p0"><div class="card-head pad" style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><h3>Lot คงเหลือ</h3>
+        ${gone.length ? `<label class="check small"><input type="checkbox" id="sc-gone"> แสดง Lot ที่หมดแล้ว (${gone.length})</label>` : ''}</div>
+        <div class="table-wrap">${active.length || gone.length ? `<table class="tbl"><thead><tr><th>Lot</th><th>วันหมดอายุ</th><th>คลัง</th><th>สถานะ</th><th class="num">คงเหลือ</th></tr></thead><tbody>
           ${active.map(l => `<tr><td class="mono">${esc(l.lot)}</td><td class="nowrap">${fmtDate(l.exp)}${countdown(l.days, l.status)}</td><td><span class="tag-wh">${esc(l.warehouse || '-')}</span></td><td>${badge(l.status)}</td><td class="num qty-strong">${fmt(l.qty)}</td></tr>`).join('')}
+          ${active.length ? '' : `<tr><td colspan="5" class="muted" style="text-align:center">ไม่มีของคงเหลือ</td></tr>`}
+          ${gone.map(l => `<tr class="sc-gone hidden" style="opacity:.6"><td class="mono">${esc(l.lot)}</td><td class="nowrap">${fmtDate(l.exp)}</td><td><span class="tag-wh">${esc(l.warehouse || '-')}</span></td><td>${badge(DEPLETED)}</td><td class="num">0</td></tr>`).join('')}
         </tbody></table>` : empty('ไม่มีของคงเหลือ')}</div></div>
       <div class="card p0"><div class="card-head pad"><h3>ประวัติการเคลื่อนไหว (บัตรคุมสินค้า)</h3></div>
         <div class="table-wrap"><table class="tbl"><thead><tr><th>วันที่</th><th>ประเภท</th><th>Lot</th><th>วันหมดอายุ</th><th>คลัง</th><th class="num">จำนวน</th><th class="num">คงเหลือ</th><th>ผู้ทำ</th></tr></thead><tbody>
@@ -535,6 +539,7 @@ async function openStockCard(barcode) {
     try { JsBarcode('#sc-barcode', c.barcode, { format: 'CODE128', height: 46, fontSize: 13, margin: 0, background: 'transparent', lineColor: getComputedStyle(document.body).color }); } catch (e) { $('#sc-barcode').remove(); }
     $('#sc-dl').onclick = () => downloadBarcode(c.barcode);
     $('#sc-print').onclick = () => askStockCards(c.barcode);
+    if ($('#sc-gone')) $('#sc-gone').onchange = e => $$('.sc-gone').forEach(tr => tr.classList.toggle('hidden', !e.target.checked));
     if ($('#sc-count')) $('#sc-count').onclick = () => openCount(c.lastCount.countNo);
     $$('#drawer-body [data-doc]').forEach(a => a.onclick = ev => { ev.preventDefault(); openDocument(a.dataset.doc); });
     $$('#drawer-body a[href^="#/move"]').forEach(a => a.addEventListener('click', closeDrawer));
@@ -1212,7 +1217,10 @@ function fillSelect(sel, list, allText) {
 function inventoryRows() {
   const wh = $('#inv-wh').value, cat = $('#inv-cat').value, q = $('#inv-q').value.trim().toLowerCase();
   // แสดงครบทุกรายการในระบบ: Lot ที่มีของ + Lot ที่ของหมดแล้ว (คงเหลือ 0 · สถานะ "หมดสต็อก")
-  const all = S.inventory.concat((S.depleted || []).map(i => ({ ...i, qty: 0, days: null, status: DEPLETED, zero: true })));
+  // ตัวเลือก "รายการ": all = ทั้งหมด · in = เฉพาะที่มีของ · out = เฉพาะที่หมดแล้ว
+  const mode = $('#inv-stock') ? $('#inv-stock').value : 'all';
+  const zeroLots = (S.depleted || []).map(i => ({ ...i, qty: 0, days: null, status: DEPLETED, zero: true }));
+  const all = mode === 'in' ? S.inventory : mode === 'out' ? zeroLots : S.inventory.concat(zeroLots);
   let rows = all.filter(i => (!wh || i.warehouse === wh) && (!cat || i.category === cat)
     && (!q || [i.name, i.barcode, i.lot].join(' ').toLowerCase().includes(q)));
   const base = rows;
@@ -1243,7 +1251,7 @@ function renderInventory({ params, changed }) {
   const counts = Object.fromEntries(STATUS_KEYS.map(k => [k, base.filter(i => i.status === k).length]));
   $('#inv-status-chips').innerHTML = `<button class="chip ${!INV.status ? 'active' : ''}" data-s="">ทั้งหมด <b>${base.length}</b></button>` +
     STATUS_KEYS.map(k => `<button class="chip ${INV.status === k ? 'active' : ''}" data-s="${k}"><span class="lg-dot" style="width:8px;height:8px;border-radius:50%;background:${STATUS[k].color}"></span>${STATUS[k].th} <b>${counts[k]}</b></button>`).join('')
-    + `<button class="chip ${INV.status === DEPLETED ? 'active' : ''}" data-s="${DEPLETED}"><span class="lg-dot" style="width:8px;height:8px;border-radius:50%;background:var(--muted)"></span>${DEPLETED_TH} <b>${base.filter(i => i.zero).length}</b></button>`;
+    + (($('#inv-stock') || {}).value === 'in' ? '' : `<button class="chip ${INV.status === DEPLETED ? 'active' : ''}" data-s="${DEPLETED}"><span class="lg-dot" style="width:8px;height:8px;border-radius:50%;background:var(--muted)"></span>${DEPLETED_TH} <b>${base.filter(i => i.zero).length}</b></button>`);
   $$('#inv-status-chips .chip').forEach(c => c.onclick = () => { INV.status = c.dataset.s; renderInventory({ params: new URLSearchParams() }); });
   const totalQty = rows.reduce((s, r) => s + r.qty, 0);
   const zeroN = rows.filter(r => r.zero).length;
@@ -1275,6 +1283,15 @@ function renderInventory({ params, changed }) {
   $$('#inv-table [data-delete]').forEach(b => b.onclick = () => deleteInventoryItem(rows[+b.dataset.delete]));
 }
 ['#inv-wh', '#inv-cat'].forEach(id => $(id).addEventListener('change', () => renderInventory({ params: new URLSearchParams() })));
+// ตัวเลือก "รายการ" (มีของ / หมดแล้ว / ทั้งหมด) — จำค่าไว้ในเครื่อง · ถ้าเลือกสถานะ "หมดสต็อก" อยู่แล้วเปลี่ยนเป็น "เฉพาะที่มีของ" ให้ล้างตัวกรองสถานะ
+if ($('#inv-stock')) {
+  try { const v = localStorage.getItem('inv-stock'); if (v && [...$('#inv-stock').options].some(o => o.value === v)) $('#inv-stock').value = v; } catch (e) { /* ไม่มี storage */ }
+  $('#inv-stock').addEventListener('change', () => {
+    try { localStorage.setItem('inv-stock', $('#inv-stock').value); } catch (e) { /* ไม่มี storage */ }
+    if ($('#inv-stock').value === 'in' && INV.status === DEPLETED) INV.status = '';
+    renderInventory({ params: new URLSearchParams() });
+  });
+}
 $('#inv-q').addEventListener('input', debounce(() => renderInventory({ params: new URLSearchParams() }), 120));
 $('#inv-view').addEventListener('click', e => { const b = e.target.closest('button'); if (b) { INV.view = b.dataset.v; renderInventory({ params: new URLSearchParams() }); } });
 
@@ -1332,7 +1349,7 @@ $('#inv-excel').addEventListener('click', () => {
 });
 $('#inv-pdf').addEventListener('click', () => {
   const { rows } = inventoryRows();
-  const filters = [$('#inv-wh').value && `คลัง: ${$('#inv-wh').value}`, $('#inv-cat').value && `หมวด: ${$('#inv-cat').value}`, INV.status && `สถานะ: ${STATUS[INV.status].th}`, $('#inv-q').value && `ค้นหา: "${$('#inv-q').value}"`].filter(Boolean);
+  const filters = [{ in: 'เฉพาะที่มีของ', out: 'เฉพาะที่หมดแล้ว' }[$('#inv-stock').value], $('#inv-wh').value && `คลัง: ${$('#inv-wh').value}`, $('#inv-cat').value && `หมวด: ${$('#inv-cat').value}`, INV.status && `สถานะ: ${STATUS[INV.status].th}`, $('#inv-q').value && `ค้นหา: "${$('#inv-q').value}"`].filter(Boolean);
   if (INV.view === 'lot') {
     printReport({ title: 'รายงานสินค้าคงคลัง', subtitle: filters.join(' · ') || 'สินค้าทั้งหมด', file: 'Inventory_Report',
       kpis: [['จำนวน Lot', rows.length], ['รวมคงเหลือ', fmt(rows.reduce((s, r) => s + r.qty, 0)) + ' ชิ้น'], ['ใกล้หมดอายุ ≤ 90 วัน', rows.filter(r => !r.zero && r.days !== null && r.days <= 90 && r.days >= 0).length], ['หมดอายุแล้ว', rows.filter(r => r.days < 0).length]],
@@ -2057,12 +2074,13 @@ async function printCountReport(c) {
 $('#cnt-print-cards').addEventListener('click', () => askStockCards());
 async function askStockCards(barcode) {
   const prods = [...S.products].sort((a, b) => a.name.localeCompare(b.name, 'th'));
+  const inStock = new Set(S.inventory.map(i => i.barcode)); // สินค้าที่ยังมีของ · ที่เหลือ = หมดสต็อก
   const r = await Swal.fire({
     title: 'พิมพ์ Stock Card (บัตรคุมสินค้า)',
     html: `<div class="form-grid swal-left">
       <label class="field"><span>สินค้า</span><select class="select" id="sk-prod">
-        ${barcode ? '' : '<option value="__stock">ทุกสินค้าที่มีของคงเหลือ</option><option value="__all">ทุกสินค้าในระบบ</option>'}
-        ${prods.map(p => `<option value="${esc(p.barcode)}" ${p.barcode === barcode ? 'selected' : ''}>${esc(p.name)} (${esc(p.barcode)})</option>`).join('')}</select></label>
+        ${barcode ? '' : '<option value="__stock">ทุกสินค้าที่มีของคงเหลือ</option><option value="__zero">เฉพาะสินค้าที่หมดแล้ว (คงเหลือ 0)</option><option value="__all">ทุกสินค้าในระบบ (รวมที่หมดแล้ว)</option>'}
+        ${prods.map(p => `<option value="${esc(p.barcode)}" ${p.barcode === barcode ? 'selected' : ''}>${esc(p.name)} (${esc(p.barcode)})${inStock.has(p.barcode) ? '' : ' · หมดสต็อก'}</option>`).join('')}</select></label>
       <label class="field"><span>ช่วงเวลา</span><select class="select" id="sk-period">
         <option value="all">ทั้งหมด (ตั้งแต่เริ่มบันทึก)</option><option value="month">รายเดือน</option><option value="range">เลือกช่วงวันที่</option></select></label>
       <label class="field hidden" id="sk-month-wrap"><span>เดือน</span><input class="input" type="month" id="sk-month" value="${isoDate().slice(0, 7)}" max="${isoDate().slice(0, 7)}"></label>
@@ -2111,7 +2129,8 @@ async function askStockCards(barcode) {
   });
   if (!r.isConfirmed) return;
   const { sel, mode, period, sign } = r.value;
-  let list = sel === '__all' ? prods.map(p => p.barcode) : sel === '__stock' ? [...new Set(S.inventory.map(i => i.barcode))] : [sel];
+  let list = sel === '__all' ? prods.map(p => p.barcode) : sel === '__stock' ? [...inStock]
+    : sel === '__zero' ? prods.map(p => p.barcode).filter(bc => !inStock.has(bc)) : [sel];
   list = list.filter(Boolean);
   if (!list.length) return Swal.fire({ icon: 'info', title: 'ไม่มีสินค้าให้พิมพ์' });
   if (list.length > 150) return Swal.fire({ icon: 'warning', title: `สินค้า ${list.length} รายการ มากเกินไปสำหรับไฟล์เดียว`, text: 'เลือกเป็นรายสินค้า หรือ "ทุกสินค้าที่มีของคงเหลือ"' });
